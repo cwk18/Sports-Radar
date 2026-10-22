@@ -1,0 +1,1168 @@
+{
+  "name": "05B Sports Radar - Alert worker",
+  "nodes": [
+    {
+      "parameters": {
+        "workflowInputs": {
+          "values": [
+            {
+              "name": "job_id",
+              "type": "number"
+            }
+          ]
+        }
+      },
+      "id": "ecdcaa98-2cc7-4c9d-82eb-69647cea186a",
+      "name": "Alert requested",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [
+        0,
+        192
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT sports_radar.take_alert_job($1::bigint,$2::text) AS request;",
+        "options": {
+          "queryReplacement": "={{ [$json.job_id, $execution.id] }}"
+        }
+      },
+      "id": "0a58ace3-e258-49b8-88c8-a4969160155b",
+      "name": "Take alert job",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        224,
+        192
+      ],
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 2000,
+      "credentials": {
+        "postgres": {
+          "id": "wTZcc2j0HldDEYQK",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const STAGE=\"open\";\nconst readRequest=()=>{const r=$input.first().json.request;return typeof r==='string'?JSON.parse(r):r;};\nif (STAGE==='open') {\n  const c=readRequest();\n  if (!c) return [];\n  if (!['preview','start'].includes(c.kind)||!['football','basketball','f1'].includes(c.sport)||!Number.isFinite(Date.parse(c.at))) throw new Error('Invalid alert job');\n  c.phase='validate'; c.checks=0;\n  c.check_at=new Date(Math.max(Date.now(),Date.parse(c.due_at)-(c.kind==='preview'?180000:45000))).toISOString();\n  c.request_url=c.sport==='football'?'https://api.football-data.org/v4/matches/'+c.provider_id:\n    c.sport==='basketball'?'https://api.balldontlie.io/v1/games/'+c.provider_id:\n    `https://api.jolpi.ca/ergast/f1/${c.season}/${c.round}/races/?limit=100`;\n  return [{json:c}];\n}\nif (STAGE==='unwrap') return [{json:readRequest()}];\nif (STAGE==='response') {\n  const c=JSON.parse(JSON.stringify($('Unpack API slot').last().json));\n  const r=$input.first().json.body||$input.first().json;\n  const unavailable=Boolean($input.first().json.error||r.error);\n  const finish=(step)=>[{json:{...c,step}}];\n  const abort=(state,reason)=>[{json:{...c,step:'stop',finish_state:state,reason}}];\n  const next=(phase,url)=>{c.phase=phase;c.request_url=url;return finish('request');};\n  const day=d=>new Date(d).toISOString().slice(0,10);\n  if(c.phase==='validate') {\n    if(unavailable) return abort('failed','Provider unavailable during schedule recheck. No stale alert was sent.');\n    let at, valid;\n    if(c.sport==='football') {\n      valid=String(r.id)===c.provider_id&&['SCHEDULED','TIMED','IN_PLAY','PAUSED'].includes(r.status);\n      at=r.utcDate;\n      if(r.homeTeam?.name&&r.awayTeam?.name){c.home=r.homeTeam.name;c.away=r.awayTeam.name;c.title=c.home+' vs '+c.away;\n        c.participants=[r.homeTeam.name,r.homeTeam.shortName,r.homeTeam.tla,r.awayTeam.name,r.awayTeam.shortName,r.awayTeam.tla].filter(Boolean);}\n      if(c.kind==='preview'&&!['SCHEDULED','TIMED'].includes(r.status)) valid=false;\n    } else if(c.sport==='basketball') {\n      const g=r.data;\n      if(!g) return abort('failed','NBA game missing from provider response.');\n      const state=g.status_state;\n      valid=String(g.id)===c.provider_id&&!g.postponed&&!/final|postpon|cancel|suspend|abandon|delay/i.test(g.status||'')&&\n        (!state||['scheduled','in_progress'].includes(state));\n      if(c.kind==='preview'&&((state&&state!=='scheduled')||Number(g.period||0)>0))valid=false;\n      at=g.datetime;\n      if(g.home_team?.full_name&&g.visitor_team?.full_name){c.home=g.home_team.full_name;c.away=g.visitor_team.full_name;c.title=c.home+' vs '+c.away;\n        c.participants=[g.home_team.full_name,g.home_team.name,g.home_team.abbreviation,g.visitor_team.full_name,g.visitor_team.name,g.visitor_team.abbreviation].filter(Boolean);}\n    } else {\n      const race=r.MRData?.RaceTable?.Races?.find(x=>String(x.season)===c.season&&String(x.round)===c.round);\n      const session=c.session==='Race'?race:race?.Qualifying;\n      valid=Boolean(session?.date&&session?.time);\n      at=valid?session.date+'T'+session.time:null;\n    }\n    if(!valid) return abort('cancelled','Event is no longer scheduled or the session cannot be verified.');\n    const time=typeof at==='string'&&at.includes('T')?Date.parse(at):NaN;\n    if(!Number.isFinite(time))return abort('failed','Provider has no confirmed start time.');\n    c.at=new Date(time).toISOString();\n    c.due_at=new Date(time-(c.kind==='preview'?1800000:0)).toISOString();\n    const due=Date.parse(c.due_at), now=Date.now();\n    if(due<now-(c.kind==='preview'?5:3)*60000)return abort('cancelled','Alert window passed; no late alert was sent.');\n    if(due>now+12*3600000)return abort('failed','Event moved beyond this worker horizon; the planner will reconsider it.');\n    const lead=c.kind==='preview'?180000:45000;\n    if(due>now+lead+15000) {\n      if(++c.checks>8)return abort('failed','Too many schedule changes; the next planner run can reconsider this event.');\n      c.check_at=new Date(due-lead).toISOString();\n      return finish('wait');\n    }\n    if(c.kind==='start')return finish('compose');\n    c.form={};\n    if(c.sport==='football')return next('home_form',`https://api.football-data.org/v4/teams/${c.home_id}/matches?status=FINISHED&limit=100&dateFrom=${day(now-90*86400000)}&dateTo=${day(now)}`);\n    if(c.sport==='basketball')return next('nba_form',`https://api.balldontlie.io/v1/games?team_ids[]=${c.home_id}&team_ids[]=${c.away_id}&start_date=${day(now-30*86400000)}&end_date=${day(now)}&per_page=100`);\n    return next('f1_form',`https://api.jolpi.ca/ergast/f1/${c.season}/last/results/?limit=100`);\n  }\n  if(c.phase==='home_form'||c.phase==='away_form') {\n    const key=c.phase==='home_form'?'home':'away';\n    c.form[key]=!unavailable&&Array.isArray(r.matches)?r.matches:[];\n    if(key==='home')return next('away_form',`https://api.football-data.org/v4/teams/${c.away_id}/matches?status=FINISHED&limit=100&dateFrom=${day(Date.now()-90*86400000)}&dateTo=${day(Date.now())}`);\n  } else if(c.phase==='nba_form') {\n    c.form.games=!unavailable&&Array.isArray(r.data)&&r.meta?.next_cursor==null?r.data:[];\n  } else if(c.phase==='f1_form') {\n    c.form.race=!unavailable?r.MRData?.RaceTable?.Races?.[0]:null;\n  }\n  return finish('compose');\n}\nif (STAGE==='render') {\n  const c=$input.first().json;\n  const fmt=new Intl.DateTimeFormat('en-GB',{timeZone:'Europe/Paris',weekday:'short',day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'});\n  const clock=fmt.format(new Date(c.at));\n  let text;\n  if(c.kind==='start') {\n    const verb=c.sport==='football'?'Kick-off':c.sport==='basketball'?'Tip-off':c.session==='Race'?'Race start':'Qualifying start';\n    text=`⏰ ${verb} reminder\\n\\n${c.title}\\n${c.competition}\\nScheduled start: ${clock} (Europe/Paris)\\n\\nThis reminder follows the published schedule; the actual start may differ.\\n\\n/reminders off — stop start reminders`;\n  } else {\n    const lines=[`🔎 Starts in about 30 minutes`,``,c.title,`${c.competition} · ${clock} (Europe/Paris)`];\n    if(c.sport==='football'||c.sport==='basketball') {\n      const summaries=[];\n      for(const [side,id,name] of [['home',c.home_id,c.home],['away',c.away_id,c.away]]) {\n        const games=c.sport==='football'?(c.form?.[side]||[]):(c.form?.games||[]);\n        const sample=games.filter(g=>{\n          if(c.sport==='football')return g.status==='FINISHED'&&[g.homeTeam?.id,g.awayTeam?.id].map(String).includes(String(id))&&Date.parse(g.utcDate)<Date.now()&&Number.isFinite(g.score?.fullTime?.home)&&Number.isFinite(g.score?.fullTime?.away);\n          return (g.status_state==='final'||/^final/i.test(g.status||''))&&[g.home_team?.id,g.visitor_team?.id].map(String).includes(String(id))&&Number.isFinite(g.home_team_score)&&Number.isFinite(g.visitor_team_score);\n        }).sort((a,b)=>Date.parse(b.utcDate||b.datetime||b.date)-Date.parse(a.utcDate||a.datetime||a.date)).slice(0,5);\n        let wins=0,draws=0,scored=0,conceded=0;const form=[];\n        for(const g of sample){\n          const home=String(c.sport==='football'?g.homeTeam.id:g.home_team.id)===String(id);\n          const hs=c.sport==='football'?g.score.fullTime.home:g.home_team_score,as=c.sport==='football'?g.score.fullTime.away:g.visitor_team_score;\n          const a=home?hs:as,b=home?as:hs;\n          scored+=a;conceded+=b;wins+=a>b?1:0;draws+=a===b?1:0;form.push(a>b?'W':a===b?'D':'L');\n        }\n        if(!sample.length){lines.push(``,`${name}: recent results unavailable.`);continue;}\n        const n=sample.length;\n        lines.push(``,`${name} — last ${n} completed games${c.sport==='basketball'?' available in the past 30 days':''}:`,`${form.join(' · ')} (newest first)`,\n          `${wins}W${c.sport==='football'?' '+draws+'D':''} ${n-wins-draws}L · average ${c.sport==='football'?'goals':'points'}: ${(scored/n).toFixed(1)} for / ${(conceded/n).toFixed(1)} against`);\n        summaries.push({name,n,rate:wins/n});\n      }\n      if(summaries.length===2&&summaries.every(s=>s.n>=3)) {\n        const [a,b]=summaries;\n        lines.push('',Math.abs(a.rate-b.rate)<0.15?'Recent win rates are similar, so the form sample does not point to a clear advantage.':`${a.rate>b.rate?a.name:b.name} has the stronger win rate in this recent sample. That is context rather than a prediction.`);\n      }\n      lines.push('','Confirmed lineups, injuries and individual players to watch are unavailable from the free data used here.');\n    } else {\n      if(c.circuit)lines.push('',`Circuit: ${c.circuit}${c.location?' · '+c.location:''}`);\n      const race=c.form?.race;\n      if(race&&race.date&&Date.parse(race.date)<Date.parse(c.at)&&Array.isArray(race.Results)) {\n        const top=race.Results.slice().sort((a,b)=>Number(a.position)-Number(b.position)).slice(0,3);\n        lines.push('',`Most recent completed Grand Prix: ${race.raceName}`,...top.map(r=>`${r.position}. ${r.Driver.givenName} ${r.Driver.familyName} — ${r.Constructor?.name||''}`));\n      } else lines.push('','Previous race results are unavailable.');\n      lines.push('',c.session==='Race'?'Watch the opening lap and tyre strategy. Grid penalties, weather and team decisions can change the race picture.':'Qualifying sets the sporting order used to determine the grid; penalties can still change starting positions.');\n      lines.push('','Starting grid, weather and driver absences are not verified in this preview.');\n    }\n    lines.push('','/previews off — stop previews');text=lines.join('\\n');\n  }\n  c.text=text.slice(0,3500).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');\n  return [{json:c}];\n}\nif (STAGE==='recipients') {\n  const c=readRequest();\n  return c.recipients.map(r=>({json:{...c,recipients:undefined,chat_id:r.chat_id}}));\n}\nthrow new Error('Unknown worker stage');\n"
+      },
+      "id": "b5048547-f461-4139-8313-cf25da4d1ae2",
+      "name": "Open alert job",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        448,
+        192
+      ]
+    },
+    {
+      "parameters": {
+        "resume": "specificTime",
+        "dateTime": "={{ $json.check_at }}"
+      },
+      "id": "abd50c3e-20ff-4f63-bffb-5d1dbff62442",
+      "name": "Wait until schedule check",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        672,
+        192
+      ],
+      "webhookId": "b4d2771c-8ae6-703e-b638-c64009793ed2"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT sports_radar.reserve_alert_api($1::jsonb) AS request;",
+        "options": {
+          "queryReplacement": "={{ [JSON.stringify($json)] }}"
+        }
+      },
+      "id": "fca142ca-dd52-4b59-8e80-b8cdf708d40c",
+      "name": "Reserve provider slot",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        880,
+        192
+      ],
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 2000,
+      "credentials": {
+        "postgres": {
+          "id": "wTZcc2j0HldDEYQK",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const STAGE=\"unwrap\";\nconst readRequest=()=>{const r=$input.first().json.request;return typeof r==='string'?JSON.parse(r):r;};\nif (STAGE==='open') {\n  const c=readRequest();\n  if (!c) return [];\n  if (!['preview','start'].includes(c.kind)||!['football','basketball','f1'].includes(c.sport)||!Number.isFinite(Date.parse(c.at))) throw new Error('Invalid alert job');\n  c.phase='validate'; c.checks=0;\n  c.check_at=new Date(Math.max(Date.now(),Date.parse(c.due_at)-(c.kind==='preview'?180000:45000))).toISOString();\n  c.request_url=c.sport==='football'?'https://api.football-data.org/v4/matches/'+c.provider_id:\n    c.sport==='basketball'?'https://api.balldontlie.io/v1/games/'+c.provider_id:\n    `https://api.jolpi.ca/ergast/f1/${c.season}/${c.round}/races/?limit=100`;\n  return [{json:c}];\n}\nif (STAGE==='unwrap') return [{json:readRequest()}];\nif (STAGE==='response') {\n  const c=JSON.parse(JSON.stringify($('Unpack API slot').last().json));\n  const r=$input.first().json.body||$input.first().json;\n  const unavailable=Boolean($input.first().json.error||r.error);\n  const finish=(step)=>[{json:{...c,step}}];\n  const abort=(state,reason)=>[{json:{...c,step:'stop',finish_state:state,reason}}];\n  const next=(phase,url)=>{c.phase=phase;c.request_url=url;return finish('request');};\n  const day=d=>new Date(d).toISOString().slice(0,10);\n  if(c.phase==='validate') {\n    if(unavailable) return abort('failed','Provider unavailable during schedule recheck. No stale alert was sent.');\n    let at, valid;\n    if(c.sport==='football') {\n      valid=String(r.id)===c.provider_id&&['SCHEDULED','TIMED','IN_PLAY','PAUSED'].includes(r.status);\n      at=r.utcDate;\n      if(r.homeTeam?.name&&r.awayTeam?.name){c.home=r.homeTeam.name;c.away=r.awayTeam.name;c.title=c.home+' vs '+c.away;\n        c.participants=[r.homeTeam.name,r.homeTeam.shortName,r.homeTeam.tla,r.awayTeam.name,r.awayTeam.shortName,r.awayTeam.tla].filter(Boolean);}\n      if(c.kind==='preview'&&!['SCHEDULED','TIMED'].includes(r.status)) valid=false;\n    } else if(c.sport==='basketball') {\n      const g=r.data;\n      if(!g) return abort('failed','NBA game missing from provider response.');\n      const state=g.status_state;\n      valid=String(g.id)===c.provider_id&&!g.postponed&&!/final|postpon|cancel|suspend|abandon|delay/i.test(g.status||'')&&\n        (!state||['scheduled','in_progress'].includes(state));\n      if(c.kind==='preview'&&((state&&state!=='scheduled')||Number(g.period||0)>0))valid=false;\n      at=g.datetime;\n      if(g.home_team?.full_name&&g.visitor_team?.full_name){c.home=g.home_team.full_name;c.away=g.visitor_team.full_name;c.title=c.home+' vs '+c.away;\n        c.participants=[g.home_team.full_name,g.home_team.name,g.home_team.abbreviation,g.visitor_team.full_name,g.visitor_team.name,g.visitor_team.abbreviation].filter(Boolean);}\n    } else {\n      const race=r.MRData?.RaceTable?.Races?.find(x=>String(x.season)===c.season&&String(x.round)===c.round);\n      const session=c.session==='Race'?race:race?.Qualifying;\n      valid=Boolean(session?.date&&session?.time);\n      at=valid?session.date+'T'+session.time:null;\n    }\n    if(!valid) return abort('cancelled','Event is no longer scheduled or the session cannot be verified.');\n    const time=typeof at==='string'&&at.includes('T')?Date.parse(at):NaN;\n    if(!Number.isFinite(time))return abort('failed','Provider has no confirmed start time.');\n    c.at=new Date(time).toISOString();\n    c.due_at=new Date(time-(c.kind==='preview'?1800000:0)).toISOString();\n    const due=Date.parse(c.due_at), now=Date.now();\n    if(due<now-(c.kind==='preview'?5:3)*60000)return abort('cancelled','Alert window passed; no late alert was sent.');\n    if(due>now+12*3600000)return abort('failed','Event moved beyond this worker horizon; the planner will reconsider it.');\n    const lead=c.kind==='preview'?180000:45000;\n    if(due>now+lead+15000) {\n      if(++c.checks>8)return abort('failed','Too many schedule changes; the next planner run can reconsider this event.');\n      c.check_at=new Date(due-lead).toISOString();\n      return finish('wait');\n    }\n    if(c.kind==='start')return finish('compose');\n    c.form={};\n    if(c.sport==='football')return next('home_form',`https://api.football-data.org/v4/teams/${c.home_id}/matches?status=FINISHED&limit=100&dateFrom=${day(now-90*86400000)}&dateTo=${day(now)}`);\n    if(c.sport==='basketball')return next('nba_form',`https://api.balldontlie.io/v1/games?team_ids[]=${c.home_id}&team_ids[]=${c.away_id}&start_date=${day(now-30*86400000)}&end_date=${day(now)}&per_page=100`);\n    return next('f1_form',`https://api.jolpi.ca/ergast/f1/${c.season}/last/results/?limit=100`);\n  }\n  if(c.phase==='home_form'||c.phase==='away_form') {\n    const key=c.phase==='home_form'?'home':'away';\n    c.form[key]=!unavailable&&Array.isArray(r.matches)?r.matches:[];\n    if(key==='home')return next('away_form',`https://api.football-data.org/v4/teams/${c.away_id}/matches?status=FINISHED&limit=100&dateFrom=${day(Date.now()-90*86400000)}&dateTo=${day(Date.now())}`);\n  } else if(c.phase==='nba_form') {\n    c.form.games=!unavailable&&Array.isArray(r.data)&&r.meta?.next_cursor==null?r.data:[];\n  } else if(c.phase==='f1_form') {\n    c.form.race=!unavailable?r.MRData?.RaceTable?.Races?.[0]:null;\n  }\n  return finish('compose');\n}\nif (STAGE==='render') {\n  const c=$input.first().json;\n  const fmt=new Intl.DateTimeFormat('en-GB',{timeZone:'Europe/Paris',weekday:'short',day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'});\n  const clock=fmt.format(new Date(c.at));\n  let text;\n  if(c.kind==='start') {\n    const verb=c.sport==='football'?'Kick-off':c.sport==='basketball'?'Tip-off':c.session==='Race'?'Race start':'Qualifying start';\n    text=`⏰ ${verb} reminder\\n\\n${c.title}\\n${c.competition}\\nScheduled start: ${clock} (Europe/Paris)\\n\\nThis reminder follows the published schedule; the actual start may differ.\\n\\n/reminders off — stop start reminders`;\n  } else {\n    const lines=[`🔎 Starts in about 30 minutes`,``,c.title,`${c.competition} · ${clock} (Europe/Paris)`];\n    if(c.sport==='football'||c.sport==='basketball') {\n      const summaries=[];\n      for(const [side,id,name] of [['home',c.home_id,c.home],['away',c.away_id,c.away]]) {\n        const games=c.sport==='football'?(c.form?.[side]||[]):(c.form?.games||[]);\n        const sample=games.filter(g=>{\n          if(c.sport==='football')return g.status==='FINISHED'&&[g.homeTeam?.id,g.awayTeam?.id].map(String).includes(String(id))&&Date.parse(g.utcDate)<Date.now()&&Number.isFinite(g.score?.fullTime?.home)&&Number.isFinite(g.score?.fullTime?.away);\n          return (g.status_state==='final'||/^final/i.test(g.status||''))&&[g.home_team?.id,g.visitor_team?.id].map(String).includes(String(id))&&Number.isFinite(g.home_team_score)&&Number.isFinite(g.visitor_team_score);\n        }).sort((a,b)=>Date.parse(b.utcDate||b.datetime||b.date)-Date.parse(a.utcDate||a.datetime||a.date)).slice(0,5);\n        let wins=0,draws=0,scored=0,conceded=0;const form=[];\n        for(const g of sample){\n          const home=String(c.sport==='football'?g.homeTeam.id:g.home_team.id)===String(id);\n          const hs=c.sport==='football'?g.score.fullTime.home:g.home_team_score,as=c.sport==='football'?g.score.fullTime.away:g.visitor_team_score;\n          const a=home?hs:as,b=home?as:hs;\n          scored+=a;conceded+=b;wins+=a>b?1:0;draws+=a===b?1:0;form.push(a>b?'W':a===b?'D':'L');\n        }\n        if(!sample.length){lines.push(``,`${name}: recent results unavailable.`);continue;}\n        const n=sample.length;\n        lines.push(``,`${name} — last ${n} completed games${c.sport==='basketball'?' available in the past 30 days':''}:`,`${form.join(' · ')} (newest first)`,\n          `${wins}W${c.sport==='football'?' '+draws+'D':''} ${n-wins-draws}L · average ${c.sport==='football'?'goals':'points'}: ${(scored/n).toFixed(1)} for / ${(conceded/n).toFixed(1)} against`);\n        summaries.push({name,n,rate:wins/n});\n      }\n      if(summaries.length===2&&summaries.every(s=>s.n>=3)) {\n        const [a,b]=summaries;\n        lines.push('',Math.abs(a.rate-b.rate)<0.15?'Recent win rates are similar, so the form sample does not point to a clear advantage.':`${a.rate>b.rate?a.name:b.name} has the stronger win rate in this recent sample. That is context rather than a prediction.`);\n      }\n      lines.push('','Confirmed lineups, injuries and individual players to watch are unavailable from the free data used here.');\n    } else {\n      if(c.circuit)lines.push('',`Circuit: ${c.circuit}${c.location?' · '+c.location:''}`);\n      const race=c.form?.race;\n      if(race&&race.date&&Date.parse(race.date)<Date.parse(c.at)&&Array.isArray(race.Results)) {\n        const top=race.Results.slice().sort((a,b)=>Number(a.position)-Number(b.position)).slice(0,3);\n        lines.push('',`Most recent completed Grand Prix: ${race.raceName}`,...top.map(r=>`${r.position}. ${r.Driver.givenName} ${r.Driver.familyName} — ${r.Constructor?.name||''}`));\n      } else lines.push('','Previous race results are unavailable.');\n      lines.push('',c.session==='Race'?'Watch the opening lap and tyre strategy. Grid penalties, weather and team decisions can change the race picture.':'Qualifying sets the sporting order used to determine the grid; penalties can still change starting positions.');\n      lines.push('','Starting grid, weather and driver absences are not verified in this preview.');\n    }\n    lines.push('','/previews off — stop previews');text=lines.join('\\n');\n  }\n  c.text=text.slice(0,3500).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');\n  return [{json:c}];\n}\nif (STAGE==='recipients') {\n  const c=readRequest();\n  return c.recipients.map(r=>({json:{...c,recipients:undefined,chat_id:r.chat_id}}));\n}\nthrow new Error('Unknown worker stage');\n"
+      },
+      "id": "412130c8-7cf1-4a34-ba40-60da423c2e51",
+      "name": "Unpack API slot",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1104,
+        192
+      ]
+    },
+    {
+      "parameters": {
+        "resume": "specificTime",
+        "dateTime": "={{ $json.api_at }}"
+      },
+      "id": "518e80cf-f1dd-4a26-9eae-eb22fa9f43af",
+      "name": "Wait for provider slot",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        1328,
+        192
+      ],
+      "webhookId": "f4909f30-957b-60e5-84a5-66e69275d121"
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "c480c3e9-3b78-bdbe-a895-2e5159df01f3",
+                    "leftValue": "={{ $json.sport }}",
+                    "rightValue": "football",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "football"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "683b0fdb-e27b-1cd9-e656-b8e91ec73cb9",
+                    "leftValue": "={{ $json.sport }}",
+                    "rightValue": "basketball",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "basketball"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "e5cf1e96-8589-2ab7-f65d-c3fa574751d5",
+                    "leftValue": "={{ $json.sport }}",
+                    "rightValue": "f1",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "f1"
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": "extra"
+        }
+      },
+      "id": "5873a4e3-248e-436b-a073-32ba8f5f3a71",
+      "name": "Choose provider",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "position": [
+        1552,
+        192
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{ $json.request_url }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          },
+          "timeout": 20000
+        }
+      },
+      "id": "91055cec-2ddc-4e30-8c75-9abac15711e1",
+      "name": "Request football data",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1760,
+        0
+      ],
+      "notesInFlow": true,
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 7000,
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "7wt6MVOxTYTeHeVI",
+          "name": "Football API"
+        }
+      },
+      "onError": "continueRegularOutput",
+      "notes": "Use the same Football API credential as workflow 02."
+    },
+    {
+      "parameters": {
+        "url": "={{ $json.request_url }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          },
+          "timeout": 20000
+        }
+      },
+      "id": "77e0cd33-bdfc-4b03-a47f-21aa614aa0d4",
+      "name": "Request NBA data",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1760,
+        192
+      ],
+      "notesInFlow": true,
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 15000,
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "REB4ssvgsc7LJy3y",
+          "name": "BALLDONTLIE"
+        }
+      },
+      "onError": "continueRegularOutput",
+      "notes": "Select BALLDONTLIE NBA Header Auth: Authorization = exact API key, no Bearer."
+    },
+    {
+      "parameters": {
+        "url": "={{ $json.request_url }}",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          },
+          "timeout": 20000
+        }
+      },
+      "id": "d107711b-33ea-4100-adce-8dcaef5649eb",
+      "name": "Request F1 data",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1760,
+        400
+      ],
+      "notesInFlow": true,
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 2000,
+      "onError": "continueRegularOutput",
+      "notes": "Public Jolpica endpoint; no key."
+    },
+    {
+      "parameters": {
+        "jsCode": "const STAGE = 'response';\n\n// NBA history: search recent games first, then extend only if needed.\nconst nbaWindows = [30, 180, 400];\nconst nbaMaxRequests = 8;\n\nconst nbaTime = g => Date.parse(g.datetime || g.date || '');\n\nconst nbaFinal = (g, c) => {\n  const time = nbaTime(g);\n  const cutoff = Math.min(\n    c.form?.nba_search?.anchor || Date.now(),\n    Date.parse(c.at)\n  );\n\n  return (\n    g.id != null &&\n    String(g.id) !== String(c.provider_id) &&\n    g.season_type !== 'preseason' &&\n    !g.postponed &&\n    (\n      g.status_state === 'final' ||\n      (!g.status_state && /^final/i.test(g.status || ''))\n    ) &&\n    Number.isFinite(time) &&\n    time < cutoff &&\n    Number.isFinite(g.home_team_score) &&\n    Number.isFinite(g.visitor_team_score) &&\n    g.home_team_score >= 0 &&\n    g.visitor_team_score >= 0 &&\n    g.home_team_score !== g.visitor_team_score\n  );\n};\n\nconst nbaSample = (games, id, c) =>\n  [...new Map(\n    games\n      .filter(g =>\n        nbaFinal(g, c) &&\n        [g.home_team?.id, g.visitor_team?.id]\n          .map(String)\n          .includes(String(id))\n      )\n      .map(g => [String(g.id), g])\n  ).values()]\n    .sort((a, b) => nbaTime(b) - nbaTime(a))\n    .slice(0, 5);\n\nconst nbaUrl = (c, cursor) => {\n  const s = c.form.nba_search;\n  const i = s.window_index;\n  const day = t => new Date(t).toISOString().slice(0, 10);\n\n  const from = day(s.anchor - nbaWindows[i] * 86400000);\n\n  const to = i === 0\n    ? day(s.anchor)\n    : day(\n        Date.parse(\n          day(s.anchor - nbaWindows[i - 1] * 86400000) +\n          'T00:00:00Z'\n        ) - 86400000\n      );\n\n  return (\n    'https://api.balldontlie.io/v1/games' +\n    '?team_ids[]=' + c.home_id +\n    '&team_ids[]=' + c.away_id +\n    '&start_date=' + from +\n    '&end_date=' + to +\n    '&per_page=100' +\n    (\n      cursor == null\n        ? ''\n        : '&cursor=' + encodeURIComponent(String(cursor))\n    )\n  );\n};\n\n// --------------------------------------------------\n// READ PROVIDER RESPONSE\n// --------------------------------------------------\n\nif (STAGE === 'response') {\n  const c = JSON.parse(\n    JSON.stringify($('Unpack API slot').last().json)\n  );\n\n  const input = $input.first().json;\n  const r = input.body || input;\n  const unavailable = Boolean(input.error || r.error);\n\n  const finish = step => [{ json: { ...c, step } }];\n\n  const abort = (state, reason) => [{\n    json: {\n      ...c,\n      step: 'stop',\n      finish_state: state,\n      reason\n    }\n  }];\n\n  const next = (phase, url) => {\n    c.phase = phase;\n    c.request_url = url;\n    return finish('request');\n  };\n\n  const day = value =>\n    new Date(value).toISOString().slice(0, 10);\n\n  if (c.phase === 'validate') {\n    if (unavailable) {\n      return abort(\n        'failed',\n        'Provider unavailable during schedule recheck. No stale alert was sent.'\n      );\n    }\n\n    let at;\n    let valid = false;\n\n    if (c.sport === 'football') {\n      valid =\n        String(r.id) === String(c.provider_id) &&\n        ['SCHEDULED', 'TIMED', 'IN_PLAY', 'PAUSED']\n          .includes(r.status);\n\n      at = r.utcDate;\n\n      if (r.homeTeam?.name && r.awayTeam?.name) {\n        c.home = r.homeTeam.name;\n        c.away = r.awayTeam.name;\n        c.title = c.home + ' vs ' + c.away;\n\n        c.participants = [\n          r.homeTeam.name,\n          r.homeTeam.shortName,\n          r.homeTeam.tla,\n          r.awayTeam.name,\n          r.awayTeam.shortName,\n          r.awayTeam.tla\n        ].filter(Boolean);\n      }\n\n      if (\n        c.kind === 'preview' &&\n        !['SCHEDULED', 'TIMED'].includes(r.status)\n      ) {\n        valid = false;\n      }\n    } else if (c.sport === 'basketball') {\n      const g = r.data;\n\n      if (!g) {\n        return abort(\n          'failed',\n          'NBA game missing from provider response.'\n        );\n      }\n\n      const state = g.status_state;\n\n      valid =\n        String(g.id) === String(c.provider_id) &&\n        !g.postponed &&\n        !/final|postpon|cancel|suspend|abandon|delay/i.test(\n          g.status || ''\n        ) &&\n        (\n          !state ||\n          ['scheduled', 'in_progress'].includes(state)\n        );\n\n      if (\n        c.kind === 'preview' &&\n        (\n          (state && state !== 'scheduled') ||\n          Number(g.period || 0) > 0\n        )\n      ) {\n        valid = false;\n      }\n\n      at = g.datetime;\n\n      if (Number.isInteger(g.season)) {\n        c.nba_season = g.season;\n      }\n\n      if (\n        g.home_team?.full_name &&\n        g.visitor_team?.full_name\n      ) {\n        c.home = g.home_team.full_name;\n        c.away = g.visitor_team.full_name;\n        c.title = c.home + ' vs ' + c.away;\n\n        c.participants = [\n          g.home_team.full_name,\n          g.home_team.name,\n          g.home_team.abbreviation,\n          g.visitor_team.full_name,\n          g.visitor_team.name,\n          g.visitor_team.abbreviation\n        ].filter(Boolean);\n      }\n    } else if (c.sport === 'f1') {\n      const race = r.MRData?.RaceTable?.Races?.find(\n        x =>\n          String(x.season) === String(c.season) &&\n          String(x.round) === String(c.round)\n      );\n\n      const session =\n        c.session === 'Race' ? race : race?.Qualifying;\n\n      valid = Boolean(session?.date && session?.time);\n      at = valid\n        ? session.date + 'T' + session.time\n        : null;\n    }\n\n    if (!valid) {\n      return abort(\n        'cancelled',\n        'Event is no longer scheduled or the session cannot be verified.'\n      );\n    }\n\n    const time =\n      typeof at === 'string' && at.includes('T')\n        ? Date.parse(at)\n        : NaN;\n\n    if (!Number.isFinite(time)) {\n      return abort(\n        'failed',\n        'Provider has no confirmed start time.'\n      );\n    }\n\n    c.at = new Date(time).toISOString();\n    c.due_at = new Date(\n      time - (c.kind === 'preview' ? 1800000 : 0)\n    ).toISOString();\n\n    const due = Date.parse(c.due_at);\n    const now = Date.now();\n\n    if (\n      due < now - (c.kind === 'preview' ? 5 : 3) * 60000\n    ) {\n      return abort(\n        'cancelled',\n        'Alert window passed; no late alert was sent.'\n      );\n    }\n\n    if (due > now + 12 * 3600000) {\n      return abort(\n        'failed',\n        'Event moved beyond this worker horizon; the planner will reconsider it.'\n      );\n    }\n\n    const lead =\n      c.kind === 'preview' ? 180000 : 45000;\n\n    if (due > now + lead + 15000) {\n      c.checks = Number(c.checks || 0) + 1;\n\n      if (c.checks > 8) {\n        return abort(\n          'failed',\n          'Too many schedule changes; the next planner run can reconsider this event.'\n        );\n      }\n\n      c.check_at =\n        new Date(due - lead).toISOString();\n\n      return finish('wait');\n    }\n\n    if (c.kind === 'start') {\n      return finish('compose');\n    }\n\n    c.form = {};\n\n    if (c.sport === 'football') {\n      return next(\n        'home_form',\n        'https://api.football-data.org/v4/teams/' +\n        c.home_id +\n        '/matches?status=FINISHED&limit=100' +\n        '&dateFrom=' + day(now - 90 * 86400000) +\n        '&dateTo=' + day(now)\n      );\n    }\n\n    if (c.sport === 'basketball') {\n      c.form = {\n        games: [],\n        nba_search: {\n          anchor: now,\n          window_index: 0,\n          requests: 0,\n          pending: [],\n          seen_cursors: []\n        }\n      };\n\n      return next('nba_form', nbaUrl(c));\n    }\n\n    return next(\n      'f1_form',\n      'https://api.jolpi.ca/ergast/f1/' +\n      c.season +\n      '/last/results/?limit=100'\n    );\n  }\n\n  if (\n    c.phase === 'home_form' ||\n    c.phase === 'away_form'\n  ) {\n    const key =\n      c.phase === 'home_form' ? 'home' : 'away';\n\n    c.form[key] =\n      !unavailable && Array.isArray(r.matches)\n        ? r.matches\n        : [];\n\n    if (key === 'home') {\n      return next(\n        'away_form',\n        'https://api.football-data.org/v4/teams/' +\n        c.away_id +\n        '/matches?status=FINISHED&limit=100' +\n        '&dateFrom=' + day(Date.now() - 90 * 86400000) +\n        '&dateTo=' + day(Date.now())\n      );\n    }\n  } else if (c.phase === 'nba_form') {\n    c.form = c.form || {};\n    c.form.games = c.form.games || [];\n\n    const s = c.form.nba_search || (\n      c.form.nba_search = {\n        anchor: Date.now(),\n        window_index: 0,\n        requests: 0,\n        pending: [],\n        seen_cursors: []\n      }\n    );\n\n    s.requests++;\n\n    const incomplete = reason => {\n      s.pending = [];\n      c.form.nba_notice = reason;\n      return finish('compose');\n    };\n\n    if (unavailable || !Array.isArray(r.data)) {\n      return incomplete(\n        'Some result history could not be fetched; only verified results from completed searches are shown.'\n      );\n    }\n\n    s.pending.push(...r.data);\n\n    const cursor = r.meta?.next_cursor;\n\n    if (cursor != null) {\n      if (\n        !r.data.length ||\n        s.seen_cursors.includes(String(cursor))\n      ) {\n        return incomplete(\n          'The result feed repeated a page; only verified results from completed searches are shown.'\n        );\n      }\n\n      if (\n        s.requests >= nbaMaxRequests ||\n        Date.now() > Date.parse(c.due_at) + 120000\n      ) {\n        return incomplete(\n          'The result search stopped at its request or time limit; only verified results from completed searches are shown.'\n        );\n      }\n\n      s.seen_cursors.push(String(cursor));\n      return next('nba_form', nbaUrl(c, cursor));\n    }\n\n    c.form.games = [...new Map(\n      [...c.form.games, ...s.pending]\n        .filter(g => nbaFinal(g, c))\n        .map(g => [String(g.id), g])\n    ).values()];\n\n    s.pending = [];\n    s.seen_cursors = [];\n\n    const enough =\n      [c.home_id, c.away_id].every(\n        id => nbaSample(c.form.games, id, c).length === 5\n      );\n\n    if (\n      !enough &&\n      s.window_index < nbaWindows.length - 1\n    ) {\n      if (\n        s.requests >= nbaMaxRequests ||\n        Date.now() > Date.parse(c.due_at) + 120000\n      ) {\n        return incomplete(\n          'The result search stopped at its request or time limit; fewer than five games may be available.'\n        );\n      }\n\n      s.window_index++;\n      return next('nba_form', nbaUrl(c));\n    }\n  } else if (c.phase === 'f1_form') {\n    c.form.race =\n      !unavailable\n        ? r.MRData?.RaceTable?.Races?.[0]\n        : null;\n  }\n\n  return finish('compose');\n}\n\n// --------------------------------------------------\n// RENDER ALERT MESSAGE\n// --------------------------------------------------\n\nif (STAGE === 'render') {\n  const c = $input.first().json;\n\n  const fmt = new Intl.DateTimeFormat('en-GB', {\n    timeZone: 'Europe/Paris',\n    weekday: 'short',\n    day: '2-digit',\n    month: 'short',\n    hour: '2-digit',\n    minute: '2-digit'\n  });\n\n  const clock = fmt.format(new Date(c.at));\n  let text;\n\n  if (c.kind === 'start') {\n    const verb =\n      c.sport === 'football'\n        ? 'Kick-off'\n        : c.sport === 'basketball'\n          ? 'Tip-off'\n          : c.session === 'Race'\n            ? 'Race start'\n            : 'Qualifying start';\n\n    text =\n      '⏰ ' + verb + ' reminder\\n\\n' +\n      c.title + '\\n' +\n      c.competition + '\\n' +\n      'Scheduled start: ' + clock +\n      ' (Europe/Paris)\\n\\n' +\n      'This reminder follows the published schedule; ' +\n      'the actual start may differ.\\n\\n' +\n      '/reminders off — stop start reminders';\n  } else {\n    const lines = [\n      '🔎 Starts in about 30 minutes',\n      '',\n      c.title,\n      c.competition + ' · ' + clock +\n        ' (Europe/Paris)'\n    ];\n\n    if (\n      c.sport === 'football' ||\n      c.sport === 'basketball'\n    ) {\n      const summaries = [];\n      let olderSeasonIncluded = false;\n\n      if (c.sport === 'basketball') {\n        lines.push(\n          '',\n          'Recent NBA form · preseason excluded'\n        );\n      }\n\n      for (\n        const [side, id, name] of [\n          ['home', c.home_id, c.home],\n          ['away', c.away_id, c.away]\n        ]\n      ) {\n        const games =\n          c.sport === 'football'\n            ? (c.form?.[side] || [])\n            : (c.form?.games || []);\n\n        const sample =\n          c.sport === 'basketball'\n            ? nbaSample(games, id, c)\n            : games\n                .filter(g =>\n                  g.status === 'FINISHED' &&\n                  [g.homeTeam?.id, g.awayTeam?.id]\n                    .map(String)\n                    .includes(String(id)) &&\n                  Date.parse(g.utcDate) < Date.now() &&\n                  Number.isFinite(g.score?.fullTime?.home) &&\n                  Number.isFinite(g.score?.fullTime?.away)\n                )\n                .sort(\n                  (a, b) =>\n                    Date.parse(b.utcDate) -\n                    Date.parse(a.utcDate)\n                )\n                .slice(0, 5);\n\n        let wins = 0;\n        let draws = 0;\n        let scored = 0;\n        let conceded = 0;\n        const form = [];\n\n        for (const g of sample) {\n          const isHome =\n            String(\n              c.sport === 'football'\n                ? g.homeTeam.id\n                : g.home_team.id\n            ) === String(id);\n\n          const homeScore =\n            c.sport === 'football'\n              ? g.score.fullTime.home\n              : g.home_team_score;\n\n          const awayScore =\n            c.sport === 'football'\n              ? g.score.fullTime.away\n              : g.visitor_team_score;\n\n          const own = isHome ? homeScore : awayScore;\n          const opponent = isHome ? awayScore : homeScore;\n\n          scored += own;\n          conceded += opponent;\n          wins += own > opponent ? 1 : 0;\n          draws += own === opponent ? 1 : 0;\n\n          form.push(\n            own > opponent\n              ? 'W'\n              : own === opponent\n                ? 'D'\n                : 'L'\n          );\n        }\n\n        if (!sample.length) {\n          lines.push(\n            '',\n            name + ': recent results unavailable.'\n          );\n          continue;\n        }\n\n        const n = sample.length;\n\n        const description =\n          c.sport === 'basketball' && c.form?.nba_notice\n            ? 'verified recent results (' + n + ' games)'\n            : 'last ' + n + ' completed games';\n\n        lines.push(\n          '',\n          name + ' — ' + description + ':',\n          form.join(' · ') + ' (newest first)',\n          wins + 'W' +\n            (c.sport === 'football' ? ' ' + draws + 'D' : '') +\n            ' ' + (n - wins - draws) + 'L · average ' +\n            (c.sport === 'football' ? 'goals' : 'points') +\n            ': ' + (scored / n).toFixed(1) + ' for / ' +\n            (conceded / n).toFixed(1) + ' against'\n        );\n\n        if (c.sport === 'basketball') {\n          const dateFmt = new Intl.DateTimeFormat(\n            'en-GB',\n            {\n              timeZone: 'Europe/Paris',\n              day: '2-digit',\n              month: 'short',\n              year: 'numeric'\n            }\n          );\n\n          lines.push(\n            'Results dated ' +\n            dateFmt.format(\n              new Date(nbaTime(sample[sample.length - 1]))\n            ) +\n            ' – ' +\n            dateFmt.format(new Date(nbaTime(sample[0]))) +\n            '.'\n          );\n\n          const previous = [...new Set(\n            sample\n              .filter(g =>\n                Number.isInteger(g.season) &&\n                Number.isInteger(c.nba_season) &&\n                g.season < c.nba_season\n              )\n              .map(g => g.season)\n          )].sort();\n\n          if (previous.length) {\n            olderSeasonIncluded = true;\n\n            lines.push(\n              'Includes ' +\n              previous\n                .map(y => y + '–' + String(y + 1).slice(-2))\n                .join(', ') +\n              ' season results.'\n            );\n          }\n\n          if (n < 5 && !c.form?.nba_notice) {\n            lines.push(\n              'Only ' + n +\n              ' verified completed games were available ' +\n              'in the searched history.'\n            );\n          }\n        }\n\n        summaries.push({\n          name,\n          n,\n          rate: wins / n\n        });\n      }\n\n      if (\n        summaries.length === 2 &&\n        summaries.every(s => s.n >= 3) &&\n        !c.form?.nba_notice\n      ) {\n        const [a, b] = summaries;\n\n        lines.push(\n          '',\n          Math.abs(a.rate - b.rate) < 0.15\n            ? 'Recent win rates are similar, so the form ' +\n              'sample does not point to a clear advantage.'\n            : (a.rate > b.rate ? a.name : b.name) +\n              ' has the stronger win rate in this recent sample. ' +\n              'That is context rather than a prediction.'\n        );\n      }\n\n      if (\n        c.sport === 'basketball' &&\n        c.form?.nba_notice\n      ) {\n        lines.push('', c.form.nba_notice);\n      }\n\n      if (olderSeasonIncluded) {\n        lines.push(\n          '',\n          'Older-season results may reflect different ' +\n          'rosters and are only background context.'\n        );\n      }\n    } else {\n      if (c.circuit) {\n        lines.push(\n          '',\n          'Circuit: ' + c.circuit +\n          (c.location ? ' · ' + c.location : '')\n        );\n      }\n\n      const race = c.form?.race;\n\n      if (\n        race &&\n        race.date &&\n        Date.parse(race.date) < Date.parse(c.at) &&\n        Array.isArray(race.Results)\n      ) {\n        const top = race.Results\n          .slice()\n          .sort(\n            (a, b) =>\n              Number(a.position) - Number(b.position)\n          )\n          .slice(0, 3);\n\n        lines.push(\n          '',\n          'Most recent completed Grand Prix: ' +\n            race.raceName,\n          ...top.map(r =>\n            r.position + '. ' +\n            r.Driver.givenName + ' ' +\n            r.Driver.familyName + ' — ' +\n            (r.Constructor?.name || '')\n          )\n        );\n      } else {\n        lines.push(\n          '',\n          'Previous race results are unavailable.'\n        );\n      }\n\n      lines.push(\n        '',\n        c.session === 'Race'\n          ? 'Watch the opening lap and tyre strategy. ' +\n            'Grid penalties, weather and team decisions ' +\n            'can change the race picture.'\n          : 'Qualifying sets the sporting order used to ' +\n            'determine the grid; penalties can still ' +\n            'change starting positions.'\n      );\n\n      lines.push(\n        '',\n        'Starting grid, weather and driver absences ' +\n        'are not verified in this preview.'\n      );\n    }\n\n    lines.push('', '/previews off — stop previews');\n    text = lines.join('\\n');\n  }\n\n  c.text = text\n    .slice(0, 3500)\n    .replace(/&/g, '&amp;')\n    .replace(/</g, '&lt;')\n    .replace(/>/g, '&gt;');\n\n  return [{ json: c }];\n}\n\nthrow new Error(\n  'STAGE must be response in Read provider response, ' +\n  'or render in Render alert message.'\n);"
+      },
+      "id": "532e7f2e-b4bb-40ef-9530-2005a63a6f7e",
+      "name": "Read provider response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1984,
+        192
+      ]
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "b61bcfdb-16f9-21c5-8a38-d8351130937e",
+                    "leftValue": "={{ $json.step }}",
+                    "rightValue": "wait",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "wait"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "08051acb-36c2-de3b-7ac2-62bb9f75bec3",
+                    "leftValue": "={{ $json.step }}",
+                    "rightValue": "request",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "request"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "88b678e2-bdd7-eeaf-bebc-2af5ed37da8a",
+                    "leftValue": "={{ $json.step }}",
+                    "rightValue": "compose",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "compose"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "2c9f578f-30b9-931c-07a2-b078c5377592",
+                    "leftValue": "={{ $json.step }}",
+                    "rightValue": "stop",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "stop"
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": "extra"
+        }
+      },
+      "id": "76db0911-2e05-4b4c-b1ef-77ac304c44c9",
+      "name": "Next action",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "position": [
+        2208,
+        192
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const STAGE = 'render';\n\n// NBA history: search recent games first, then extend only if needed.\nconst nbaWindows = [30, 180, 400];\nconst nbaMaxRequests = 8;\n\nconst nbaTime = g => Date.parse(g.datetime || g.date || '');\n\nconst nbaFinal = (g, c) => {\n  const time = nbaTime(g);\n  const cutoff = Math.min(\n    c.form?.nba_search?.anchor || Date.now(),\n    Date.parse(c.at)\n  );\n\n  return (\n    g.id != null &&\n    String(g.id) !== String(c.provider_id) &&\n    g.season_type !== 'preseason' &&\n    !g.postponed &&\n    (\n      g.status_state === 'final' ||\n      (!g.status_state && /^final/i.test(g.status || ''))\n    ) &&\n    Number.isFinite(time) &&\n    time < cutoff &&\n    Number.isFinite(g.home_team_score) &&\n    Number.isFinite(g.visitor_team_score) &&\n    g.home_team_score >= 0 &&\n    g.visitor_team_score >= 0 &&\n    g.home_team_score !== g.visitor_team_score\n  );\n};\n\nconst nbaSample = (games, id, c) =>\n  [...new Map(\n    games\n      .filter(g =>\n        nbaFinal(g, c) &&\n        [g.home_team?.id, g.visitor_team?.id]\n          .map(String)\n          .includes(String(id))\n      )\n      .map(g => [String(g.id), g])\n  ).values()]\n    .sort((a, b) => nbaTime(b) - nbaTime(a))\n    .slice(0, 5);\n\nconst nbaUrl = (c, cursor) => {\n  const s = c.form.nba_search;\n  const i = s.window_index;\n  const day = t => new Date(t).toISOString().slice(0, 10);\n\n  const from = day(s.anchor - nbaWindows[i] * 86400000);\n\n  const to = i === 0\n    ? day(s.anchor)\n    : day(\n        Date.parse(\n          day(s.anchor - nbaWindows[i - 1] * 86400000) +\n          'T00:00:00Z'\n        ) - 86400000\n      );\n\n  return (\n    'https://api.balldontlie.io/v1/games' +\n    '?team_ids[]=' + c.home_id +\n    '&team_ids[]=' + c.away_id +\n    '&start_date=' + from +\n    '&end_date=' + to +\n    '&per_page=100' +\n    (\n      cursor == null\n        ? ''\n        : '&cursor=' + encodeURIComponent(String(cursor))\n    )\n  );\n};\n\n// --------------------------------------------------\n// READ PROVIDER RESPONSE\n// --------------------------------------------------\n\nif (STAGE === 'response') {\n  const c = JSON.parse(\n    JSON.stringify($('Unpack API slot').last().json)\n  );\n\n  const input = $input.first().json;\n  const r = input.body || input;\n  const unavailable = Boolean(input.error || r.error);\n\n  const finish = step => [{ json: { ...c, step } }];\n\n  const abort = (state, reason) => [{\n    json: {\n      ...c,\n      step: 'stop',\n      finish_state: state,\n      reason\n    }\n  }];\n\n  const next = (phase, url) => {\n    c.phase = phase;\n    c.request_url = url;\n    return finish('request');\n  };\n\n  const day = value =>\n    new Date(value).toISOString().slice(0, 10);\n\n  if (c.phase === 'validate') {\n    if (unavailable) {\n      return abort(\n        'failed',\n        'Provider unavailable during schedule recheck. No stale alert was sent.'\n      );\n    }\n\n    let at;\n    let valid = false;\n\n    if (c.sport === 'football') {\n      valid =\n        String(r.id) === String(c.provider_id) &&\n        ['SCHEDULED', 'TIMED', 'IN_PLAY', 'PAUSED']\n          .includes(r.status);\n\n      at = r.utcDate;\n\n      if (r.homeTeam?.name && r.awayTeam?.name) {\n        c.home = r.homeTeam.name;\n        c.away = r.awayTeam.name;\n        c.title = c.home + ' vs ' + c.away;\n\n        c.participants = [\n          r.homeTeam.name,\n          r.homeTeam.shortName,\n          r.homeTeam.tla,\n          r.awayTeam.name,\n          r.awayTeam.shortName,\n          r.awayTeam.tla\n        ].filter(Boolean);\n      }\n\n      if (\n        c.kind === 'preview' &&\n        !['SCHEDULED', 'TIMED'].includes(r.status)\n      ) {\n        valid = false;\n      }\n    } else if (c.sport === 'basketball') {\n      const g = r.data;\n\n      if (!g) {\n        return abort(\n          'failed',\n          'NBA game missing from provider response.'\n        );\n      }\n\n      const state = g.status_state;\n\n      valid =\n        String(g.id) === String(c.provider_id) &&\n        !g.postponed &&\n        !/final|postpon|cancel|suspend|abandon|delay/i.test(\n          g.status || ''\n        ) &&\n        (\n          !state ||\n          ['scheduled', 'in_progress'].includes(state)\n        );\n\n      if (\n        c.kind === 'preview' &&\n        (\n          (state && state !== 'scheduled') ||\n          Number(g.period || 0) > 0\n        )\n      ) {\n        valid = false;\n      }\n\n      at = g.datetime;\n\n      if (Number.isInteger(g.season)) {\n        c.nba_season = g.season;\n      }\n\n      if (\n        g.home_team?.full_name &&\n        g.visitor_team?.full_name\n      ) {\n        c.home = g.home_team.full_name;\n        c.away = g.visitor_team.full_name;\n        c.title = c.home + ' vs ' + c.away;\n\n        c.participants = [\n          g.home_team.full_name,\n          g.home_team.name,\n          g.home_team.abbreviation,\n          g.visitor_team.full_name,\n          g.visitor_team.name,\n          g.visitor_team.abbreviation\n        ].filter(Boolean);\n      }\n    } else if (c.sport === 'f1') {\n      const race = r.MRData?.RaceTable?.Races?.find(\n        x =>\n          String(x.season) === String(c.season) &&\n          String(x.round) === String(c.round)\n      );\n\n      const session =\n        c.session === 'Race' ? race : race?.Qualifying;\n\n      valid = Boolean(session?.date && session?.time);\n      at = valid\n        ? session.date + 'T' + session.time\n        : null;\n    }\n\n    if (!valid) {\n      return abort(\n        'cancelled',\n        'Event is no longer scheduled or the session cannot be verified.'\n      );\n    }\n\n    const time =\n      typeof at === 'string' && at.includes('T')\n        ? Date.parse(at)\n        : NaN;\n\n    if (!Number.isFinite(time)) {\n      return abort(\n        'failed',\n        'Provider has no confirmed start time.'\n      );\n    }\n\n    c.at = new Date(time).toISOString();\n    c.due_at = new Date(\n      time - (c.kind === 'preview' ? 1800000 : 0)\n    ).toISOString();\n\n    const due = Date.parse(c.due_at);\n    const now = Date.now();\n\n    if (\n      due < now - (c.kind === 'preview' ? 5 : 3) * 60000\n    ) {\n      return abort(\n        'cancelled',\n        'Alert window passed; no late alert was sent.'\n      );\n    }\n\n    if (due > now + 12 * 3600000) {\n      return abort(\n        'failed',\n        'Event moved beyond this worker horizon; the planner will reconsider it.'\n      );\n    }\n\n    const lead =\n      c.kind === 'preview' ? 180000 : 45000;\n\n    if (due > now + lead + 15000) {\n      c.checks = Number(c.checks || 0) + 1;\n\n      if (c.checks > 8) {\n        return abort(\n          'failed',\n          'Too many schedule changes; the next planner run can reconsider this event.'\n        );\n      }\n\n      c.check_at =\n        new Date(due - lead).toISOString();\n\n      return finish('wait');\n    }\n\n    if (c.kind === 'start') {\n      return finish('compose');\n    }\n\n    c.form = {};\n\n    if (c.sport === 'football') {\n      return next(\n        'home_form',\n        'https://api.football-data.org/v4/teams/' +\n        c.home_id +\n        '/matches?status=FINISHED&limit=100' +\n        '&dateFrom=' + day(now - 90 * 86400000) +\n        '&dateTo=' + day(now)\n      );\n    }\n\n    if (c.sport === 'basketball') {\n      c.form = {\n        games: [],\n        nba_search: {\n          anchor: now,\n          window_index: 0,\n          requests: 0,\n          pending: [],\n          seen_cursors: []\n        }\n      };\n\n      return next('nba_form', nbaUrl(c));\n    }\n\n    return next(\n      'f1_form',\n      'https://api.jolpi.ca/ergast/f1/' +\n      c.season +\n      '/last/results/?limit=100'\n    );\n  }\n\n  if (\n    c.phase === 'home_form' ||\n    c.phase === 'away_form'\n  ) {\n    const key =\n      c.phase === 'home_form' ? 'home' : 'away';\n\n    c.form[key] =\n      !unavailable && Array.isArray(r.matches)\n        ? r.matches\n        : [];\n\n    if (key === 'home') {\n      return next(\n        'away_form',\n        'https://api.football-data.org/v4/teams/' +\n        c.away_id +\n        '/matches?status=FINISHED&limit=100' +\n        '&dateFrom=' + day(Date.now() - 90 * 86400000) +\n        '&dateTo=' + day(Date.now())\n      );\n    }\n  } else if (c.phase === 'nba_form') {\n    c.form = c.form || {};\n    c.form.games = c.form.games || [];\n\n    const s = c.form.nba_search || (\n      c.form.nba_search = {\n        anchor: Date.now(),\n        window_index: 0,\n        requests: 0,\n        pending: [],\n        seen_cursors: []\n      }\n    );\n\n    s.requests++;\n\n    const incomplete = reason => {\n      s.pending = [];\n      c.form.nba_notice = reason;\n      return finish('compose');\n    };\n\n    if (unavailable || !Array.isArray(r.data)) {\n      return incomplete(\n        'Some result history could not be fetched; only verified results from completed searches are shown.'\n      );\n    }\n\n    s.pending.push(...r.data);\n\n    const cursor = r.meta?.next_cursor;\n\n    if (cursor != null) {\n      if (\n        !r.data.length ||\n        s.seen_cursors.includes(String(cursor))\n      ) {\n        return incomplete(\n          'The result feed repeated a page; only verified results from completed searches are shown.'\n        );\n      }\n\n      if (\n        s.requests >= nbaMaxRequests ||\n        Date.now() > Date.parse(c.due_at) + 120000\n      ) {\n        return incomplete(\n          'The result search stopped at its request or time limit; only verified results from completed searches are shown.'\n        );\n      }\n\n      s.seen_cursors.push(String(cursor));\n      return next('nba_form', nbaUrl(c, cursor));\n    }\n\n    c.form.games = [...new Map(\n      [...c.form.games, ...s.pending]\n        .filter(g => nbaFinal(g, c))\n        .map(g => [String(g.id), g])\n    ).values()];\n\n    s.pending = [];\n    s.seen_cursors = [];\n\n    const enough =\n      [c.home_id, c.away_id].every(\n        id => nbaSample(c.form.games, id, c).length === 5\n      );\n\n    if (\n      !enough &&\n      s.window_index < nbaWindows.length - 1\n    ) {\n      if (\n        s.requests >= nbaMaxRequests ||\n        Date.now() > Date.parse(c.due_at) + 120000\n      ) {\n        return incomplete(\n          'The result search stopped at its request or time limit; fewer than five games may be available.'\n        );\n      }\n\n      s.window_index++;\n      return next('nba_form', nbaUrl(c));\n    }\n  } else if (c.phase === 'f1_form') {\n    c.form.race =\n      !unavailable\n        ? r.MRData?.RaceTable?.Races?.[0]\n        : null;\n  }\n\n  return finish('compose');\n}\n\n// --------------------------------------------------\n// RENDER ALERT MESSAGE\n// --------------------------------------------------\n\nif (STAGE === 'render') {\n  const c = $input.first().json;\n\n  const fmt = new Intl.DateTimeFormat('en-GB', {\n    timeZone: 'Europe/Paris',\n    weekday: 'short',\n    day: '2-digit',\n    month: 'short',\n    hour: '2-digit',\n    minute: '2-digit'\n  });\n\n  const clock = fmt.format(new Date(c.at));\n  let text;\n\n  if (c.kind === 'start') {\n    const verb =\n      c.sport === 'football'\n        ? 'Kick-off'\n        : c.sport === 'basketball'\n          ? 'Tip-off'\n          : c.session === 'Race'\n            ? 'Race start'\n            : 'Qualifying start';\n\n    text =\n      '⏰ ' + verb + ' reminder\\n\\n' +\n      c.title + '\\n' +\n      c.competition + '\\n' +\n      'Scheduled start: ' + clock +\n      ' (Europe/Paris)\\n\\n' +\n      'This reminder follows the published schedule; ' +\n      'the actual start may differ.\\n\\n' +\n      '/reminders off — stop start reminders';\n  } else {\n    const lines = [\n      '🔎 Starts in about 30 minutes',\n      '',\n      c.title,\n      c.competition + ' · ' + clock +\n        ' (Europe/Paris)'\n    ];\n\n    if (\n      c.sport === 'football' ||\n      c.sport === 'basketball'\n    ) {\n      const summaries = [];\n      let olderSeasonIncluded = false;\n\n      if (c.sport === 'basketball') {\n        lines.push(\n          '',\n          'Recent NBA form · preseason excluded'\n        );\n      }\n\n      for (\n        const [side, id, name] of [\n          ['home', c.home_id, c.home],\n          ['away', c.away_id, c.away]\n        ]\n      ) {\n        const games =\n          c.sport === 'football'\n            ? (c.form?.[side] || [])\n            : (c.form?.games || []);\n\n        const sample =\n          c.sport === 'basketball'\n            ? nbaSample(games, id, c)\n            : games\n                .filter(g =>\n                  g.status === 'FINISHED' &&\n                  [g.homeTeam?.id, g.awayTeam?.id]\n                    .map(String)\n                    .includes(String(id)) &&\n                  Date.parse(g.utcDate) < Date.now() &&\n                  Number.isFinite(g.score?.fullTime?.home) &&\n                  Number.isFinite(g.score?.fullTime?.away)\n                )\n                .sort(\n                  (a, b) =>\n                    Date.parse(b.utcDate) -\n                    Date.parse(a.utcDate)\n                )\n                .slice(0, 5);\n\n        let wins = 0;\n        let draws = 0;\n        let scored = 0;\n        let conceded = 0;\n        const form = [];\n\n        for (const g of sample) {\n          const isHome =\n            String(\n              c.sport === 'football'\n                ? g.homeTeam.id\n                : g.home_team.id\n            ) === String(id);\n\n          const homeScore =\n            c.sport === 'football'\n              ? g.score.fullTime.home\n              : g.home_team_score;\n\n          const awayScore =\n            c.sport === 'football'\n              ? g.score.fullTime.away\n              : g.visitor_team_score;\n\n          const own = isHome ? homeScore : awayScore;\n          const opponent = isHome ? awayScore : homeScore;\n\n          scored += own;\n          conceded += opponent;\n          wins += own > opponent ? 1 : 0;\n          draws += own === opponent ? 1 : 0;\n\n          form.push(\n            own > opponent\n              ? 'W'\n              : own === opponent\n                ? 'D'\n                : 'L'\n          );\n        }\n\n        if (!sample.length) {\n          lines.push(\n            '',\n            name + ': recent results unavailable.'\n          );\n          continue;\n        }\n\n        const n = sample.length;\n\n        const description =\n          c.sport === 'basketball' && c.form?.nba_notice\n            ? 'verified recent results (' + n + ' games)'\n            : 'last ' + n + ' completed games';\n\n        lines.push(\n          '',\n          name + ' — ' + description + ':',\n          form.join(' · ') + ' (newest first)',\n          wins + 'W' +\n            (c.sport === 'football' ? ' ' + draws + 'D' : '') +\n            ' ' + (n - wins - draws) + 'L · average ' +\n            (c.sport === 'football' ? 'goals' : 'points') +\n            ': ' + (scored / n).toFixed(1) + ' for / ' +\n            (conceded / n).toFixed(1) + ' against'\n        );\n\n        if (c.sport === 'basketball') {\n          const dateFmt = new Intl.DateTimeFormat(\n            'en-GB',\n            {\n              timeZone: 'Europe/Paris',\n              day: '2-digit',\n              month: 'short',\n              year: 'numeric'\n            }\n          );\n\n          lines.push(\n            'Results dated ' +\n            dateFmt.format(\n              new Date(nbaTime(sample[sample.length - 1]))\n            ) +\n            ' – ' +\n            dateFmt.format(new Date(nbaTime(sample[0]))) +\n            '.'\n          );\n\n          const previous = [...new Set(\n            sample\n              .filter(g =>\n                Number.isInteger(g.season) &&\n                Number.isInteger(c.nba_season) &&\n                g.season < c.nba_season\n              )\n              .map(g => g.season)\n          )].sort();\n\n          if (previous.length) {\n            olderSeasonIncluded = true;\n\n            lines.push(\n              'Includes ' +\n              previous\n                .map(y => y + '–' + String(y + 1).slice(-2))\n                .join(', ') +\n              ' season results.'\n            );\n          }\n\n          if (n < 5 && !c.form?.nba_notice) {\n            lines.push(\n              'Only ' + n +\n              ' verified completed games were available ' +\n              'in the searched history.'\n            );\n          }\n        }\n\n        summaries.push({\n          name,\n          n,\n          rate: wins / n\n        });\n      }\n\n      if (\n        summaries.length === 2 &&\n        summaries.every(s => s.n >= 3) &&\n        !c.form?.nba_notice\n      ) {\n        const [a, b] = summaries;\n\n        lines.push(\n          '',\n          Math.abs(a.rate - b.rate) < 0.15\n            ? 'Recent win rates are similar, so the form ' +\n              'sample does not point to a clear advantage.'\n            : (a.rate > b.rate ? a.name : b.name) +\n              ' has the stronger win rate in this recent sample. ' +\n              'That is context rather than a prediction.'\n        );\n      }\n\n      if (\n        c.sport === 'basketball' &&\n        c.form?.nba_notice\n      ) {\n        lines.push('', c.form.nba_notice);\n      }\n\n      if (olderSeasonIncluded) {\n        lines.push(\n          '',\n          'Older-season results may reflect different ' +\n          'rosters and are only background context.'\n        );\n      }\n    } else {\n      if (c.circuit) {\n        lines.push(\n          '',\n          'Circuit: ' + c.circuit +\n          (c.location ? ' · ' + c.location : '')\n        );\n      }\n\n      const race = c.form?.race;\n\n      if (\n        race &&\n        race.date &&\n        Date.parse(race.date) < Date.parse(c.at) &&\n        Array.isArray(race.Results)\n      ) {\n        const top = race.Results\n          .slice()\n          .sort(\n            (a, b) =>\n              Number(a.position) - Number(b.position)\n          )\n          .slice(0, 3);\n\n        lines.push(\n          '',\n          'Most recent completed Grand Prix: ' +\n            race.raceName,\n          ...top.map(r =>\n            r.position + '. ' +\n            r.Driver.givenName + ' ' +\n            r.Driver.familyName + ' — ' +\n            (r.Constructor?.name || '')\n          )\n        );\n      } else {\n        lines.push(\n          '',\n          'Previous race results are unavailable.'\n        );\n      }\n\n      lines.push(\n        '',\n        c.session === 'Race'\n          ? 'Watch the opening lap and tyre strategy. ' +\n            'Grid penalties, weather and team decisions ' +\n            'can change the race picture.'\n          : 'Qualifying sets the sporting order used to ' +\n            'determine the grid; penalties can still ' +\n            'change starting positions.'\n      );\n\n      lines.push(\n        '',\n        'Starting grid, weather and driver absences ' +\n        'are not verified in this preview.'\n      );\n    }\n\n    lines.push('', '/previews off — stop previews');\n    text = lines.join('\\n');\n  }\n\n  c.text = text\n    .slice(0, 3500)\n    .replace(/&/g, '&amp;')\n    .replace(/</g, '&lt;')\n    .replace(/>/g, '&gt;');\n\n  return [{ json: c }];\n}\n\nthrow new Error(\n  'STAGE must be response in Read provider response, ' +\n  'or render in Render alert message.'\n);"
+      },
+      "id": "69858098-6a84-4684-8bc3-05953bfb0071",
+      "name": "Render alert message",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2448,
+        192
+      ]
+    },
+    {
+      "parameters": {
+        "resume": "specificTime",
+        "dateTime": "={{ $json.due_at }}"
+      },
+      "id": "6ef1e3c8-073c-4fb4-8ea6-e4749f26c393",
+      "name": "Wait until alert time",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        2672,
+        192
+      ],
+      "webhookId": "718c2028-aa9f-b477-2bfe-c2ef65259eb4"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT sports_radar.claim_alert_recipients($1::jsonb) AS request;",
+        "options": {
+          "queryReplacement": "={{ [JSON.stringify($json)] }}"
+        }
+      },
+      "id": "0144478d-5059-4ead-8fe1-73c4f67ed1ae",
+      "name": "Claim current recipients",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        2880,
+        192
+      ],
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 2000,
+      "credentials": {
+        "postgres": {
+          "id": "wTZcc2j0HldDEYQK",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const STAGE=\"unwrap\";\nconst readRequest=()=>{const r=$input.first().json.request;return typeof r==='string'?JSON.parse(r):r;};\nif (STAGE==='open') {\n  const c=readRequest();\n  if (!c) return [];\n  if (!['preview','start'].includes(c.kind)||!['football','basketball','f1'].includes(c.sport)||!Number.isFinite(Date.parse(c.at))) throw new Error('Invalid alert job');\n  c.phase='validate'; c.checks=0;\n  c.check_at=new Date(Math.max(Date.now(),Date.parse(c.due_at)-(c.kind==='preview'?180000:45000))).toISOString();\n  c.request_url=c.sport==='football'?'https://api.football-data.org/v4/matches/'+c.provider_id:\n    c.sport==='basketball'?'https://api.balldontlie.io/v1/games/'+c.provider_id:\n    `https://api.jolpi.ca/ergast/f1/${c.season}/${c.round}/races/?limit=100`;\n  return [{json:c}];\n}\nif (STAGE==='unwrap') return [{json:readRequest()}];\nif (STAGE==='response') {\n  const c=JSON.parse(JSON.stringify($('Unpack API slot').last().json));\n  const r=$input.first().json.body||$input.first().json;\n  const unavailable=Boolean($input.first().json.error||r.error);\n  const finish=(step)=>[{json:{...c,step}}];\n  const abort=(state,reason)=>[{json:{...c,step:'stop',finish_state:state,reason}}];\n  const next=(phase,url)=>{c.phase=phase;c.request_url=url;return finish('request');};\n  const day=d=>new Date(d).toISOString().slice(0,10);\n  if(c.phase==='validate') {\n    if(unavailable) return abort('failed','Provider unavailable during schedule recheck. No stale alert was sent.');\n    let at, valid;\n    if(c.sport==='football') {\n      valid=String(r.id)===c.provider_id&&['SCHEDULED','TIMED','IN_PLAY','PAUSED'].includes(r.status);\n      at=r.utcDate;\n      if(r.homeTeam?.name&&r.awayTeam?.name){c.home=r.homeTeam.name;c.away=r.awayTeam.name;c.title=c.home+' vs '+c.away;\n        c.participants=[r.homeTeam.name,r.homeTeam.shortName,r.homeTeam.tla,r.awayTeam.name,r.awayTeam.shortName,r.awayTeam.tla].filter(Boolean);}\n      if(c.kind==='preview'&&!['SCHEDULED','TIMED'].includes(r.status)) valid=false;\n    } else if(c.sport==='basketball') {\n      const g=r.data;\n      if(!g) return abort('failed','NBA game missing from provider response.');\n      const state=g.status_state;\n      valid=String(g.id)===c.provider_id&&!g.postponed&&!/final|postpon|cancel|suspend|abandon|delay/i.test(g.status||'')&&\n        (!state||['scheduled','in_progress'].includes(state));\n      if(c.kind==='preview'&&((state&&state!=='scheduled')||Number(g.period||0)>0))valid=false;\n      at=g.datetime;\n      if(g.home_team?.full_name&&g.visitor_team?.full_name){c.home=g.home_team.full_name;c.away=g.visitor_team.full_name;c.title=c.home+' vs '+c.away;\n        c.participants=[g.home_team.full_name,g.home_team.name,g.home_team.abbreviation,g.visitor_team.full_name,g.visitor_team.name,g.visitor_team.abbreviation].filter(Boolean);}\n    } else {\n      const race=r.MRData?.RaceTable?.Races?.find(x=>String(x.season)===c.season&&String(x.round)===c.round);\n      const session=c.session==='Race'?race:race?.Qualifying;\n      valid=Boolean(session?.date&&session?.time);\n      at=valid?session.date+'T'+session.time:null;\n    }\n    if(!valid) return abort('cancelled','Event is no longer scheduled or the session cannot be verified.');\n    const time=typeof at==='string'&&at.includes('T')?Date.parse(at):NaN;\n    if(!Number.isFinite(time))return abort('failed','Provider has no confirmed start time.');\n    c.at=new Date(time).toISOString();\n    c.due_at=new Date(time-(c.kind==='preview'?1800000:0)).toISOString();\n    const due=Date.parse(c.due_at), now=Date.now();\n    if(due<now-(c.kind==='preview'?5:3)*60000)return abort('cancelled','Alert window passed; no late alert was sent.');\n    if(due>now+12*3600000)return abort('failed','Event moved beyond this worker horizon; the planner will reconsider it.');\n    const lead=c.kind==='preview'?180000:45000;\n    if(due>now+lead+15000) {\n      if(++c.checks>8)return abort('failed','Too many schedule changes; the next planner run can reconsider this event.');\n      c.check_at=new Date(due-lead).toISOString();\n      return finish('wait');\n    }\n    if(c.kind==='start')return finish('compose');\n    c.form={};\n    if(c.sport==='football')return next('home_form',`https://api.football-data.org/v4/teams/${c.home_id}/matches?status=FINISHED&limit=100&dateFrom=${day(now-90*86400000)}&dateTo=${day(now)}`);\n    if(c.sport==='basketball')return next('nba_form',`https://api.balldontlie.io/v1/games?team_ids[]=${c.home_id}&team_ids[]=${c.away_id}&start_date=${day(now-30*86400000)}&end_date=${day(now)}&per_page=100`);\n    return next('f1_form',`https://api.jolpi.ca/ergast/f1/${c.season}/last/results/?limit=100`);\n  }\n  if(c.phase==='home_form'||c.phase==='away_form') {\n    const key=c.phase==='home_form'?'home':'away';\n    c.form[key]=!unavailable&&Array.isArray(r.matches)?r.matches:[];\n    if(key==='home')return next('away_form',`https://api.football-data.org/v4/teams/${c.away_id}/matches?status=FINISHED&limit=100&dateFrom=${day(Date.now()-90*86400000)}&dateTo=${day(Date.now())}`);\n  } else if(c.phase==='nba_form') {\n    c.form.games=!unavailable&&Array.isArray(r.data)&&r.meta?.next_cursor==null?r.data:[];\n  } else if(c.phase==='f1_form') {\n    c.form.race=!unavailable?r.MRData?.RaceTable?.Races?.[0]:null;\n  }\n  return finish('compose');\n}\nif (STAGE==='render') {\n  const c=$input.first().json;\n  const fmt=new Intl.DateTimeFormat('en-GB',{timeZone:'Europe/Paris',weekday:'short',day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'});\n  const clock=fmt.format(new Date(c.at));\n  let text;\n  if(c.kind==='start') {\n    const verb=c.sport==='football'?'Kick-off':c.sport==='basketball'?'Tip-off':c.session==='Race'?'Race start':'Qualifying start';\n    text=`⏰ ${verb} reminder\\n\\n${c.title}\\n${c.competition}\\nScheduled start: ${clock} (Europe/Paris)\\n\\nThis reminder follows the published schedule; the actual start may differ.\\n\\n/reminders off — stop start reminders`;\n  } else {\n    const lines=[`🔎 Starts in about 30 minutes`,``,c.title,`${c.competition} · ${clock} (Europe/Paris)`];\n    if(c.sport==='football'||c.sport==='basketball') {\n      const summaries=[];\n      for(const [side,id,name] of [['home',c.home_id,c.home],['away',c.away_id,c.away]]) {\n        const games=c.sport==='football'?(c.form?.[side]||[]):(c.form?.games||[]);\n        const sample=games.filter(g=>{\n          if(c.sport==='football')return g.status==='FINISHED'&&[g.homeTeam?.id,g.awayTeam?.id].map(String).includes(String(id))&&Date.parse(g.utcDate)<Date.now()&&Number.isFinite(g.score?.fullTime?.home)&&Number.isFinite(g.score?.fullTime?.away);\n          return (g.status_state==='final'||/^final/i.test(g.status||''))&&[g.home_team?.id,g.visitor_team?.id].map(String).includes(String(id))&&Number.isFinite(g.home_team_score)&&Number.isFinite(g.visitor_team_score);\n        }).sort((a,b)=>Date.parse(b.utcDate||b.datetime||b.date)-Date.parse(a.utcDate||a.datetime||a.date)).slice(0,5);\n        let wins=0,draws=0,scored=0,conceded=0;const form=[];\n        for(const g of sample){\n          const home=String(c.sport==='football'?g.homeTeam.id:g.home_team.id)===String(id);\n          const hs=c.sport==='football'?g.score.fullTime.home:g.home_team_score,as=c.sport==='football'?g.score.fullTime.away:g.visitor_team_score;\n          const a=home?hs:as,b=home?as:hs;\n          scored+=a;conceded+=b;wins+=a>b?1:0;draws+=a===b?1:0;form.push(a>b?'W':a===b?'D':'L');\n        }\n        if(!sample.length){lines.push(``,`${name}: recent results unavailable.`);continue;}\n        const n=sample.length;\n        lines.push(``,`${name} — last ${n} completed games${c.sport==='basketball'?' available in the past 30 days':''}:`,`${form.join(' · ')} (newest first)`,\n          `${wins}W${c.sport==='football'?' '+draws+'D':''} ${n-wins-draws}L · average ${c.sport==='football'?'goals':'points'}: ${(scored/n).toFixed(1)} for / ${(conceded/n).toFixed(1)} against`);\n        summaries.push({name,n,rate:wins/n});\n      }\n      if(summaries.length===2&&summaries.every(s=>s.n>=3)) {\n        const [a,b]=summaries;\n        lines.push('',Math.abs(a.rate-b.rate)<0.15?'Recent win rates are similar, so the form sample does not point to a clear advantage.':`${a.rate>b.rate?a.name:b.name} has the stronger win rate in this recent sample. That is context rather than a prediction.`);\n      }\n      lines.push('','Confirmed lineups, injuries and individual players to watch are unavailable from the free data used here.');\n    } else {\n      if(c.circuit)lines.push('',`Circuit: ${c.circuit}${c.location?' · '+c.location:''}`);\n      const race=c.form?.race;\n      if(race&&race.date&&Date.parse(race.date)<Date.parse(c.at)&&Array.isArray(race.Results)) {\n        const top=race.Results.slice().sort((a,b)=>Number(a.position)-Number(b.position)).slice(0,3);\n        lines.push('',`Most recent completed Grand Prix: ${race.raceName}`,...top.map(r=>`${r.position}. ${r.Driver.givenName} ${r.Driver.familyName} — ${r.Constructor?.name||''}`));\n      } else lines.push('','Previous race results are unavailable.');\n      lines.push('',c.session==='Race'?'Watch the opening lap and tyre strategy. Grid penalties, weather and team decisions can change the race picture.':'Qualifying sets the sporting order used to determine the grid; penalties can still change starting positions.');\n      lines.push('','Starting grid, weather and driver absences are not verified in this preview.');\n    }\n    lines.push('','/previews off — stop previews');text=lines.join('\\n');\n  }\n  c.text=text.slice(0,3500).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');\n  return [{json:c}];\n}\nif (STAGE==='recipients') {\n  const c=readRequest();\n  return c.recipients.map(r=>({json:{...c,recipients:undefined,chat_id:r.chat_id}}));\n}\nthrow new Error('Unknown worker stage');\n"
+      },
+      "id": "e3dd023f-3188-4b4f-9502-26cfd8e6a629",
+      "name": "Unpack recipients",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3104,
+        192
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "fad546de-1254-2178-255e-14d98ef8999f",
+              "leftValue": "={{ $json.recipients.length > 0 }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "4668c7fb-1348-4e1b-abac-887e94c59ca3",
+      "name": "Has recipients?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        3328,
+        192
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const c=$input.first().json; return c.recipients.map(r=>({json:{...c,recipients:undefined,chat_id:r.chat_id}}));"
+      },
+      "id": "fae41b09-42ef-4750-8881-0a210eab3a2d",
+      "name": "Expand recipients",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3552,
+        192
+      ]
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "id": "7d5aeec8-d587-4e22-b379-d41a57055a46",
+      "name": "For each recipient",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [
+        3760,
+        192
+      ]
+    },
+    {
+      "parameters": {
+        "amount": 1
+      },
+      "id": "bf93b8be-4a6e-4e2c-a4e1-a85d4fbc5c41",
+      "name": "Space Telegram sends",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        3984,
+        336
+      ],
+      "webhookId": "ab63c733-2d45-29ee-2e5d-23a472e9b9b9"
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $json.chat_id }}",
+        "text": "={{ $json.text }}",
+        "replyMarkup": "inlineKeyboard",
+        "inlineKeyboard": {
+          "rows": [
+            {
+              "row": {
+                "buttons": [
+                  {
+                    "text": "🏠 Home",
+                    "additionalFields": {
+                      "callback_data": "menu:sports"
+                    }
+                  }
+                ]
+              }
+            }
+          ]
+        },
+        "additionalFields": {
+          "appendAttribution": false,
+          "parse_mode": "HTML"
+        }
+      },
+      "id": "823aec7d-c782-424a-9a87-b84686817c9c",
+      "name": "Send event alert",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        4208,
+        336
+      ],
+      "webhookId": "07fcd114-98ec-4e3a-9cda-520cc9efae1d",
+      "credentials": {
+        "telegramApi": {
+          "id": "S4RpggWlw9PWBEfq",
+          "name": "Telegram account"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT sports_radar.finish_alert_delivery($1::jsonb) AS recorded;",
+        "options": {
+          "queryReplacement": "={{ [JSON.stringify({event_id:$('For each recipient').item.json.event_id,kind:$('For each recipient').item.json.kind,chat_id:$('For each recipient').item.json.chat_id,message_id:$json.message_id ?? $json.result?.message_id ?? null})] }}"
+        }
+      },
+      "id": "fd6cd364-239a-4341-a5dc-7ad9d449bb0f",
+      "name": "Record delivery",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        4432,
+        336
+      ],
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 2000,
+      "credentials": {
+        "postgres": {
+          "id": "wTZcc2j0HldDEYQK",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH done AS (UPDATE sports_radar.alert_jobs SET state='done',updated_at=now() WHERE job_id=$1::bigint AND owner=$2::text AND state='processing' RETURNING event_id,kind) SELECT (SELECT count(*)::int FROM sports_radar.alert_deliveries d JOIN done j USING(event_id,kind) WHERE d.state='error') AS failed_deliveries;",
+        "options": {
+          "queryReplacement": "={{ [$('Open alert job').first().json.job_id,$execution.id] }}"
+        }
+      },
+      "id": "e483a6e6-e46f-465f-9620-daf4fd5073ef",
+      "name": "Finish alert job",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        3984,
+        96
+      ],
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 2000,
+      "credentials": {
+        "postgres": {
+          "id": "wTZcc2j0HldDEYQK",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "if(Number($input.first().json.failed_deliveries)>0)throw new Error('Some Telegram event alerts failed. Inspect sports_radar.alert_deliveries; failed or uncertain sends are not automatically retried to avoid duplicates.'); return $input.all();"
+      },
+      "id": "818dc371-45e6-4ae3-8e5d-03e7922fdff3",
+      "name": "Report delivery issues",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        4208,
+        96
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE sports_radar.alert_jobs SET state=$3::text,payload=$4::jsonb,updated_at=now() WHERE job_id=$1::bigint AND owner=$2::text AND state='processing' RETURNING job_id,state,payload->>'reason' AS reason;",
+        "options": {
+          "queryReplacement": "={{ [$json.job_id,$execution.id,$json.finish_state,JSON.stringify($json)] }}"
+        }
+      },
+      "id": "ce958f17-698d-491c-9c01-ba891d05053e",
+      "name": "Stop unsafe alert",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        2448,
+        544
+      ],
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 2000,
+      "credentials": {
+        "postgres": {
+          "id": "wTZcc2j0HldDEYQK",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const c=$input.first().json; if(c.state==='failed')throw new Error(c.reason||'Event alert could not be verified.'); return $input.all();"
+      },
+      "id": "85abd819-c714-4c5b-a8bd-53ffe55a587e",
+      "name": "Report provider issues",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2672,
+        544
+      ]
+    },
+    {
+      "parameters": {},
+      "id": "524dc694-f076-4e79-b101-e092ec426985",
+      "name": "Test delivery",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        752
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const chat_id='8798971457';\nif (!/^[0-9]+$/.test(chat_id)) throw new Error('Replace YOUR_CHAT_ID in Test settings with your private Telegram chat ID.');\nreturn [{json:{chat_id,text:'✅ Sports Radar 05 test received.\\n\\nTelegram delivery is working. This is a test, not a real event alert. No follows or alert preferences were changed.'}}];"
+      },
+      "id": "c442b920-d2e4-44a3-8050-d0901c977201",
+      "name": "Test settings",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        240,
+        752
+      ]
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $json.chat_id }}",
+        "text": "={{ $json.text }}",
+        "replyMarkup": "inlineKeyboard",
+        "inlineKeyboard": {
+          "rows": [
+            {
+              "row": {
+                "buttons": [
+                  {
+                    "text": "🏠 Home",
+                    "additionalFields": {
+                      "callback_data": "menu:sports"
+                    }
+                  }
+                ]
+              }
+            }
+          ]
+        },
+        "additionalFields": {
+          "appendAttribution": false,
+          "parse_mode": "HTML"
+        }
+      },
+      "id": "0ee12016-db74-4a77-8170-3e7579d9505b",
+      "name": "Send test only",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        480,
+        752
+      ],
+      "webhookId": "dedd95a1-5ba2-4c3c-90e2-9550aa5c55fc",
+      "credentials": {
+        "telegramApi": {
+          "id": "S4RpggWlw9PWBEfq",
+          "name": "Telegram account"
+        }
+      }
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Alert requested": {
+      "main": [
+        [
+          {
+            "node": "Take alert job",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Take alert job": {
+      "main": [
+        [
+          {
+            "node": "Open alert job",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Open alert job": {
+      "main": [
+        [
+          {
+            "node": "Wait until schedule check",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait until schedule check": {
+      "main": [
+        [
+          {
+            "node": "Reserve provider slot",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Reserve provider slot": {
+      "main": [
+        [
+          {
+            "node": "Unpack API slot",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Unpack API slot": {
+      "main": [
+        [
+          {
+            "node": "Wait for provider slot",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait for provider slot": {
+      "main": [
+        [
+          {
+            "node": "Choose provider",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Choose provider": {
+      "main": [
+        [
+          {
+            "node": "Request football data",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Request NBA data",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Request F1 data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Request football data": {
+      "main": [
+        [
+          {
+            "node": "Read provider response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Request NBA data": {
+      "main": [
+        [
+          {
+            "node": "Read provider response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Request F1 data": {
+      "main": [
+        [
+          {
+            "node": "Read provider response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read provider response": {
+      "main": [
+        [
+          {
+            "node": "Next action",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Next action": {
+      "main": [
+        [
+          {
+            "node": "Wait until schedule check",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Reserve provider slot",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Render alert message",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Stop unsafe alert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Render alert message": {
+      "main": [
+        [
+          {
+            "node": "Wait until alert time",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait until alert time": {
+      "main": [
+        [
+          {
+            "node": "Claim current recipients",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Claim current recipients": {
+      "main": [
+        [
+          {
+            "node": "Unpack recipients",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Unpack recipients": {
+      "main": [
+        [
+          {
+            "node": "Has recipients?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Has recipients?": {
+      "main": [
+        [
+          {
+            "node": "Expand recipients",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Finish alert job",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Expand recipients": {
+      "main": [
+        [
+          {
+            "node": "For each recipient",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "For each recipient": {
+      "main": [
+        [
+          {
+            "node": "Finish alert job",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Space Telegram sends",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Space Telegram sends": {
+      "main": [
+        [
+          {
+            "node": "Send event alert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send event alert": {
+      "main": [
+        [
+          {
+            "node": "Record delivery",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Record delivery": {
+      "main": [
+        [
+          {
+            "node": "For each recipient",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Finish alert job": {
+      "main": [
+        [
+          {
+            "node": "Report delivery issues",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Stop unsafe alert": {
+      "main": [
+        [
+          {
+            "node": "Report provider issues",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Test delivery": {
+      "main": [
+        [
+          {
+            "node": "Test settings",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Test settings": {
+      "main": [
+        [
+          {
+            "node": "Send test only",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "timeSavedMode": "fixed",
+    "errorWorkflow": "fAG5yPnBOyIugGks",
+    "callerPolicy": "workflowsFromSameOwner",
+    "availableInMCP": false
+  },
+  "versionId": "e083c66b-f4cf-45e2-ac7d-af68d74e0e93",
+  "meta": {
+    "instanceId": "7f5b4816cf946ff530226ad8173417053f6c6a61e7a2cb6ce6af47a8f65f31ed"
+  },
+  "nodeGroups": [],
+  "id": "nrX9ApZJULDGX1xZ",
+  "tags": []
+}

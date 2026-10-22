@@ -1,0 +1,828 @@
+{
+  "name": "05 Sports Radar - Previews and start reminders",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 0 */6 * * *"
+            }
+          ]
+        }
+      },
+      "id": "69a304a3-bc58-4c38-be22-a4847e47f72a",
+      "name": "Every six hours",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        0
+      ]
+    },
+    {
+      "parameters": {},
+      "id": "67c59921-d372-4f67-892e-c7a916bb6926",
+      "name": "Plan now",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        192
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT jsonb_build_object('users',COALESCE(jsonb_agg(u),'[]'::jsonb)) AS context FROM (\n SELECT a.chat_id,a.previews_enabled,a.reminders_enabled,\n jsonb_agg(jsonb_build_object('sport',f.sport,'team_key',f.team_key,'label',f.label,'aliases',f.aliases)) AS prefs\n FROM sports_radar.alert_preferences a JOIN sports_radar.follows f ON f.chat_id=a.chat_id\n WHERE a.previews_enabled OR a.reminders_enabled\n GROUP BY a.chat_id,a.previews_enabled,a.reminders_enabled\n) u;",
+        "options": {
+          "queryReplacement": "={{ [] }}"
+        }
+      },
+      "id": "5b2e5b1f-5227-46a9-a650-07bb0d6c75c1",
+      "name": "Load alert audience",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        224,
+        144
+      ],
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 2000,
+      "credentials": {
+        "postgres": {
+          "id": "wTZcc2j0HldDEYQK",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const STAGE=\"init\";\n// Executed in an n8n Code node. The generator supplies the chosen STAGE.\nconst rows = $input.all();\nif (STAGE === 'init') {\n  const c = typeof rows[0].json.context === 'string' ? JSON.parse(rows[0].json.context) : rows[0].json.context;\n  if (!c.users.length) return [];\n  const now = new Date();\n  const until = new Date(now.getTime()+6*3600000);\n  const end = new Date(until.getTime()+30*60000);\n  return [{json:{...c,now:now.toISOString(),until:until.toISOString(),end:end.toISOString(),\n    from:new Date(now.getTime()-86400000).toISOString().slice(0,10),to:new Date(end.getTime()+86400000).toISOString().slice(0,10),\n    year:now.getUTCFullYear(),end_year:end.getUTCFullYear(),events:[],warnings:[]}}];\n}\nconst source = {football:'Football needed?',basketball:'NBA needed?',f1:'F1 needed?',next:'Next year needed?'};\nif (source[STAGE]) {\n  const c = JSON.parse(JSON.stringify($(source[STAGE]).first().json));\n  const r = rows[0].json;\n  if (STAGE === 'football') {\n    if (r.error || !Array.isArray(r.matches)) {\n      c.warnings.push('Football calendar unavailable; inspect credentials and rerun the planner.');\n      return [{json:c}];\n    }\n    for (const m of r.matches) if (['SCHEDULED','TIMED'].includes(m.status) && m.homeTeam?.id && m.awayTeam?.id)\n      c.events.push({event_id:'football-'+m.id,provider_id:String(m.id),sport:'football',at:m.utcDate,\n        home_id:m.homeTeam.id,away_id:m.awayTeam.id,home:m.homeTeam.name,away:m.awayTeam.name,\n        title:m.homeTeam.name+' vs '+m.awayTeam.name,competition:m.competition?.name||'Football',\n        participants:[m.homeTeam.name,m.homeTeam.shortName,m.homeTeam.tla,m.awayTeam.name,m.awayTeam.shortName,m.awayTeam.tla].filter(Boolean)});\n  } else if (STAGE === 'basketball') {\n    for (const row of rows) {\n      const body=row.json.body||row.json;\n      if (row.json.error || body.error || !Array.isArray(body.data)) {\n        c.warnings.push('BALLDONTLIE calendar unavailable. Check credentials or rate limit, then rerun the planner.');\n        continue;\n      }\n      for (const g of body.data) {\n        if (g.postponed || (g.status_state && g.status_state!=='scheduled') || /final|postpon|cancel|suspend|abandon|delay/i.test(g.status||'')) continue;\n        if (!g.status_state && Number(g.period||0)!==0) continue;\n        if (!g.home_team?.id || !g.visitor_team?.id) continue;\n        c.events.push({event_id:'basketball-bdl-'+g.id,provider_id:String(g.id),sport:'basketball',at:g.datetime,\n          home_id:g.home_team.id,away_id:g.visitor_team.id,home:g.home_team.full_name,away:g.visitor_team.full_name,\n          title:g.home_team.full_name+' vs '+g.visitor_team.full_name,competition:'NBA',\n          participants:[g.home_team.full_name,g.home_team.name,g.home_team.abbreviation,g.visitor_team.full_name,g.visitor_team.name,g.visitor_team.abbreviation].filter(Boolean)});\n      }\n    }\n    const last=rows.at(-1).json;\n    if ((last.body||last).meta?.next_cursor!=null) c.warnings.push('NBA calendar pagination incomplete; rerun after fixing pagination.');\n  } else {\n    const races=r.MRData?.RaceTable?.Races;\n    if (r.error || !Array.isArray(races)) {\n      c.warnings.push('Jolpica F1 schedule unavailable; rerun the planner later.');\n      return [{json:c}];\n    }\n    for (const race of races) for (const [session,s] of [['Race',race],['Qualifying',race.Qualifying]]) {\n      if (!s?.time || !s.date) continue;\n      c.events.push({event_id:`f1-${race.season}-${race.round}-${session}`,sport:'f1',season:String(race.season),round:String(race.round),session,\n        at:s.date+'T'+s.time,title:race.raceName+' — '+session,competition:'Formula 1',participants:[],\n        circuit:race.Circuit?.circuitName||'',location:race.Circuit?.Location?.locality||''});\n    }\n  }\n  return [{json:c}];\n}\nif (STAGE === 'jobs') {\n  const c=rows[0].json, now=Date.now(), until=Date.parse(c.until), jobs=[], seen=new Set();\n  const norm=s=>String(s||'').normalize('NFD').replace(/[\\u0300-\\u036f]/g,'').toLowerCase().replace(/[^a-z0-9]/g,'');\n  const follows=(u,e)=>u.prefs.some(p=>p.sport===e.sport && (e.sport==='f1'||[...(p.aliases||[]),p.label].some(a=>e.participants.some(n=>norm(n)===norm(a)))));\n  for (const e of c.events) {\n    const at=Date.parse(e.at);\n    if (!Number.isFinite(at) || !String(e.at).includes('T') || !e.title || seen.has(e.event_id)) continue;\n    seen.add(e.event_id);\n    for (const kind of ['preview','start']) {\n      const due=at-(kind==='preview'?30*60000:0);\n      if (due<now-(kind==='preview'?5:3)*60000 || due>=until) continue;\n      if (!c.users.some(u=>(kind==='preview'?u.previews_enabled:u.reminders_enabled) && follows(u,e))) continue;\n      jobs.push({...e,kind,due_at:new Date(due).toISOString()});\n    }\n  }\n  jobs.sort((a,b)=>a.due_at.localeCompare(b.due_at));\n  return [{json:{jobs,warnings:c.warnings||[]}}];\n}\nthrow new Error('Unknown planner stage');\n"
+      },
+      "id": "a2a23973-3d6e-4e21-974f-c559ec1aab87",
+      "name": "Prepare alert window",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        448,
+        144
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "32a8a218-4cd2-02b0-041f-b48a12f0f025",
+              "leftValue": "={{ $json.users.some(u => u.prefs.some(p => p.sport === 'football')) }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "9397961a-d575-4225-9394-0b2ad3d05309",
+      "name": "Football needed?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        672,
+        144
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{ 'https://api.football-data.org/v4/matches?dateFrom=' + $json.from + '&dateTo=' + $json.to + '&competitions=PL,PD,FL1,BL1,SA,CL' }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          },
+          "timeout": 20000
+        }
+      },
+      "id": "5282777a-c37b-4be9-89b8-da8daf3a7ce4",
+      "name": "Get football calendar",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        896,
+        32
+      ],
+      "notesInFlow": true,
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 7000,
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "7wt6MVOxTYTeHeVI",
+          "name": "Football API"
+        }
+      },
+      "onError": "continueRegularOutput",
+      "notes": "Use the same Football API credential as workflow 02."
+    },
+    {
+      "parameters": {
+        "jsCode": "const STAGE=\"football\";\n// Executed in an n8n Code node. The generator supplies the chosen STAGE.\nconst rows = $input.all();\nif (STAGE === 'init') {\n  const c = typeof rows[0].json.context === 'string' ? JSON.parse(rows[0].json.context) : rows[0].json.context;\n  if (!c.users.length) return [];\n  const now = new Date();\n  const until = new Date(now.getTime()+6*3600000);\n  const end = new Date(until.getTime()+30*60000);\n  return [{json:{...c,now:now.toISOString(),until:until.toISOString(),end:end.toISOString(),\n    from:new Date(now.getTime()-86400000).toISOString().slice(0,10),to:new Date(end.getTime()+86400000).toISOString().slice(0,10),\n    year:now.getUTCFullYear(),end_year:end.getUTCFullYear(),events:[],warnings:[]}}];\n}\nconst source = {football:'Football needed?',basketball:'NBA needed?',f1:'F1 needed?',next:'Next year needed?'};\nif (source[STAGE]) {\n  const c = JSON.parse(JSON.stringify($(source[STAGE]).first().json));\n  const r = rows[0].json;\n  if (STAGE === 'football') {\n    if (r.error || !Array.isArray(r.matches)) {\n      c.warnings.push('Football calendar unavailable; inspect credentials and rerun the planner.');\n      return [{json:c}];\n    }\n    for (const m of r.matches) if (['SCHEDULED','TIMED'].includes(m.status) && m.homeTeam?.id && m.awayTeam?.id)\n      c.events.push({event_id:'football-'+m.id,provider_id:String(m.id),sport:'football',at:m.utcDate,\n        home_id:m.homeTeam.id,away_id:m.awayTeam.id,home:m.homeTeam.name,away:m.awayTeam.name,\n        title:m.homeTeam.name+' vs '+m.awayTeam.name,competition:m.competition?.name||'Football',\n        participants:[m.homeTeam.name,m.homeTeam.shortName,m.homeTeam.tla,m.awayTeam.name,m.awayTeam.shortName,m.awayTeam.tla].filter(Boolean)});\n  } else if (STAGE === 'basketball') {\n    for (const row of rows) {\n      const body=row.json.body||row.json;\n      if (row.json.error || body.error || !Array.isArray(body.data)) {\n        c.warnings.push('BALLDONTLIE calendar unavailable. Check credentials or rate limit, then rerun the planner.');\n        continue;\n      }\n      for (const g of body.data) {\n        if (g.postponed || (g.status_state && g.status_state!=='scheduled') || /final|postpon|cancel|suspend|abandon|delay/i.test(g.status||'')) continue;\n        if (!g.status_state && Number(g.period||0)!==0) continue;\n        if (!g.home_team?.id || !g.visitor_team?.id) continue;\n        c.events.push({event_id:'basketball-bdl-'+g.id,provider_id:String(g.id),sport:'basketball',at:g.datetime,\n          home_id:g.home_team.id,away_id:g.visitor_team.id,home:g.home_team.full_name,away:g.visitor_team.full_name,\n          title:g.home_team.full_name+' vs '+g.visitor_team.full_name,competition:'NBA',\n          participants:[g.home_team.full_name,g.home_team.name,g.home_team.abbreviation,g.visitor_team.full_name,g.visitor_team.name,g.visitor_team.abbreviation].filter(Boolean)});\n      }\n    }\n    const last=rows.at(-1).json;\n    if ((last.body||last).meta?.next_cursor!=null) c.warnings.push('NBA calendar pagination incomplete; rerun after fixing pagination.');\n  } else {\n    const races=r.MRData?.RaceTable?.Races;\n    if (r.error || !Array.isArray(races)) {\n      c.warnings.push('Jolpica F1 schedule unavailable; rerun the planner later.');\n      return [{json:c}];\n    }\n    for (const race of races) for (const [session,s] of [['Race',race],['Qualifying',race.Qualifying]]) {\n      if (!s?.time || !s.date) continue;\n      c.events.push({event_id:`f1-${race.season}-${race.round}-${session}`,sport:'f1',season:String(race.season),round:String(race.round),session,\n        at:s.date+'T'+s.time,title:race.raceName+' — '+session,competition:'Formula 1',participants:[],\n        circuit:race.Circuit?.circuitName||'',location:race.Circuit?.Location?.locality||''});\n    }\n  }\n  return [{json:c}];\n}\nif (STAGE === 'jobs') {\n  const c=rows[0].json, now=Date.now(), until=Date.parse(c.until), jobs=[], seen=new Set();\n  const norm=s=>String(s||'').normalize('NFD').replace(/[\\u0300-\\u036f]/g,'').toLowerCase().replace(/[^a-z0-9]/g,'');\n  const follows=(u,e)=>u.prefs.some(p=>p.sport===e.sport && (e.sport==='f1'||[...(p.aliases||[]),p.label].some(a=>e.participants.some(n=>norm(n)===norm(a)))));\n  for (const e of c.events) {\n    const at=Date.parse(e.at);\n    if (!Number.isFinite(at) || !String(e.at).includes('T') || !e.title || seen.has(e.event_id)) continue;\n    seen.add(e.event_id);\n    for (const kind of ['preview','start']) {\n      const due=at-(kind==='preview'?30*60000:0);\n      if (due<now-(kind==='preview'?5:3)*60000 || due>=until) continue;\n      if (!c.users.some(u=>(kind==='preview'?u.previews_enabled:u.reminders_enabled) && follows(u,e))) continue;\n      jobs.push({...e,kind,due_at:new Date(due).toISOString()});\n    }\n  }\n  jobs.sort((a,b)=>a.due_at.localeCompare(b.due_at));\n  return [{json:{jobs,warnings:c.warnings||[]}}];\n}\nthrow new Error('Unknown planner stage');\n"
+      },
+      "id": "e848b077-5ea7-4816-92e1-16f2afb51acc",
+      "name": "Read football calendar",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1120,
+        32
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "6685bbcd-a91f-561a-31ab-3ce36ac9d853",
+              "leftValue": "={{ $json.users.some(u => u.prefs.some(p => p.sport === 'basketball')) }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "ff7b53a5-5bfc-43e5-91cf-a15f76128fab",
+      "name": "NBA needed?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1344,
+        144
+      ]
+    },
+    {
+      "parameters": {
+        "url": "https://api.balldontlie.io/v1/games",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "start_date",
+              "value": "={{ $json.from }}"
+            },
+            {
+              "name": "end_date",
+              "value": "={{ $json.to }}"
+            },
+            {
+              "name": "per_page",
+              "value": "100"
+            }
+          ]
+        },
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          },
+          "pagination": {
+            "pagination": {
+              "parameters": {
+                "parameters": [
+                  {
+                    "name": "cursor",
+                    "value": "={{ $response.body?.meta?.next_cursor ?? 0 }}"
+                  }
+                ]
+              },
+              "paginationCompleteWhen": "other",
+              "completeExpression": "={{ $response.body?.meta?.next_cursor == null }}",
+              "limitPagesFetched": true,
+              "maxRequests": 10,
+              "requestInterval": 13000
+            }
+          },
+          "timeout": 20000
+        }
+      },
+      "id": "8c3ad768-b19f-44d5-899c-1049f380e5fa",
+      "name": "Get NBA calendar",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1568,
+        32
+      ],
+      "notesInFlow": true,
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 15000,
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "REB4ssvgsc7LJy3y",
+          "name": "BALLDONTLIE"
+        }
+      },
+      "onError": "continueRegularOutput",
+      "notes": "Select BALLDONTLIE NBA Header Auth: Authorization = exact API key, no Bearer."
+    },
+    {
+      "parameters": {
+        "jsCode": "const STAGE=\"basketball\";\n// Executed in an n8n Code node. The generator supplies the chosen STAGE.\nconst rows = $input.all();\nif (STAGE === 'init') {\n  const c = typeof rows[0].json.context === 'string' ? JSON.parse(rows[0].json.context) : rows[0].json.context;\n  if (!c.users.length) return [];\n  const now = new Date();\n  const until = new Date(now.getTime()+6*3600000);\n  const end = new Date(until.getTime()+30*60000);\n  return [{json:{...c,now:now.toISOString(),until:until.toISOString(),end:end.toISOString(),\n    from:new Date(now.getTime()-86400000).toISOString().slice(0,10),to:new Date(end.getTime()+86400000).toISOString().slice(0,10),\n    year:now.getUTCFullYear(),end_year:end.getUTCFullYear(),events:[],warnings:[]}}];\n}\nconst source = {football:'Football needed?',basketball:'NBA needed?',f1:'F1 needed?',next:'Next year needed?'};\nif (source[STAGE]) {\n  const c = JSON.parse(JSON.stringify($(source[STAGE]).first().json));\n  const r = rows[0].json;\n  if (STAGE === 'football') {\n    if (r.error || !Array.isArray(r.matches)) {\n      c.warnings.push('Football calendar unavailable; inspect credentials and rerun the planner.');\n      return [{json:c}];\n    }\n    for (const m of r.matches) if (['SCHEDULED','TIMED'].includes(m.status) && m.homeTeam?.id && m.awayTeam?.id)\n      c.events.push({event_id:'football-'+m.id,provider_id:String(m.id),sport:'football',at:m.utcDate,\n        home_id:m.homeTeam.id,away_id:m.awayTeam.id,home:m.homeTeam.name,away:m.awayTeam.name,\n        title:m.homeTeam.name+' vs '+m.awayTeam.name,competition:m.competition?.name||'Football',\n        participants:[m.homeTeam.name,m.homeTeam.shortName,m.homeTeam.tla,m.awayTeam.name,m.awayTeam.shortName,m.awayTeam.tla].filter(Boolean)});\n  } else if (STAGE === 'basketball') {\n    for (const row of rows) {\n      const body=row.json.body||row.json;\n      if (row.json.error || body.error || !Array.isArray(body.data)) {\n        c.warnings.push('BALLDONTLIE calendar unavailable. Check credentials or rate limit, then rerun the planner.');\n        continue;\n      }\n      for (const g of body.data) {\n        if (g.postponed || (g.status_state && g.status_state!=='scheduled') || /final|postpon|cancel|suspend|abandon|delay/i.test(g.status||'')) continue;\n        if (!g.status_state && Number(g.period||0)!==0) continue;\n        if (!g.home_team?.id || !g.visitor_team?.id) continue;\n        c.events.push({event_id:'basketball-bdl-'+g.id,provider_id:String(g.id),sport:'basketball',at:g.datetime,\n          home_id:g.home_team.id,away_id:g.visitor_team.id,home:g.home_team.full_name,away:g.visitor_team.full_name,\n          title:g.home_team.full_name+' vs '+g.visitor_team.full_name,competition:'NBA',\n          participants:[g.home_team.full_name,g.home_team.name,g.home_team.abbreviation,g.visitor_team.full_name,g.visitor_team.name,g.visitor_team.abbreviation].filter(Boolean)});\n      }\n    }\n    const last=rows.at(-1).json;\n    if ((last.body||last).meta?.next_cursor!=null) c.warnings.push('NBA calendar pagination incomplete; rerun after fixing pagination.');\n  } else {\n    const races=r.MRData?.RaceTable?.Races;\n    if (r.error || !Array.isArray(races)) {\n      c.warnings.push('Jolpica F1 schedule unavailable; rerun the planner later.');\n      return [{json:c}];\n    }\n    for (const race of races) for (const [session,s] of [['Race',race],['Qualifying',race.Qualifying]]) {\n      if (!s?.time || !s.date) continue;\n      c.events.push({event_id:`f1-${race.season}-${race.round}-${session}`,sport:'f1',season:String(race.season),round:String(race.round),session,\n        at:s.date+'T'+s.time,title:race.raceName+' — '+session,competition:'Formula 1',participants:[],\n        circuit:race.Circuit?.circuitName||'',location:race.Circuit?.Location?.locality||''});\n    }\n  }\n  return [{json:c}];\n}\nif (STAGE === 'jobs') {\n  const c=rows[0].json, now=Date.now(), until=Date.parse(c.until), jobs=[], seen=new Set();\n  const norm=s=>String(s||'').normalize('NFD').replace(/[\\u0300-\\u036f]/g,'').toLowerCase().replace(/[^a-z0-9]/g,'');\n  const follows=(u,e)=>u.prefs.some(p=>p.sport===e.sport && (e.sport==='f1'||[...(p.aliases||[]),p.label].some(a=>e.participants.some(n=>norm(n)===norm(a)))));\n  for (const e of c.events) {\n    const at=Date.parse(e.at);\n    if (!Number.isFinite(at) || !String(e.at).includes('T') || !e.title || seen.has(e.event_id)) continue;\n    seen.add(e.event_id);\n    for (const kind of ['preview','start']) {\n      const due=at-(kind==='preview'?30*60000:0);\n      if (due<now-(kind==='preview'?5:3)*60000 || due>=until) continue;\n      if (!c.users.some(u=>(kind==='preview'?u.previews_enabled:u.reminders_enabled) && follows(u,e))) continue;\n      jobs.push({...e,kind,due_at:new Date(due).toISOString()});\n    }\n  }\n  jobs.sort((a,b)=>a.due_at.localeCompare(b.due_at));\n  return [{json:{jobs,warnings:c.warnings||[]}}];\n}\nthrow new Error('Unknown planner stage');\n"
+      },
+      "id": "b94a2f9e-3138-4b67-886f-63be2ed3cefa",
+      "name": "Read NBA calendar",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1792,
+        32
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "04d4ab1a-e394-e223-f5fd-0894c75a68a4",
+              "leftValue": "={{ $json.users.some(u => u.prefs.some(p => p.sport === 'f1')) }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "e99c5f24-7852-482c-998b-66f8ca9b8d29",
+      "name": "F1 needed?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        2016,
+        144
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{ 'https://api.jolpi.ca/ergast/f1/'+$json.year+'/races/?limit=100' }}",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          },
+          "timeout": 20000
+        }
+      },
+      "id": "a262a79a-e8b8-428a-b574-539c98e364c5",
+      "name": "Get F1 calendar",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2240,
+        32
+      ],
+      "notesInFlow": true,
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 2000,
+      "onError": "continueRegularOutput",
+      "notes": "Public Jolpica endpoint; no key."
+    },
+    {
+      "parameters": {
+        "jsCode": "const STAGE=\"f1\";\n// Executed in an n8n Code node. The generator supplies the chosen STAGE.\nconst rows = $input.all();\nif (STAGE === 'init') {\n  const c = typeof rows[0].json.context === 'string' ? JSON.parse(rows[0].json.context) : rows[0].json.context;\n  if (!c.users.length) return [];\n  const now = new Date();\n  const until = new Date(now.getTime()+6*3600000);\n  const end = new Date(until.getTime()+30*60000);\n  return [{json:{...c,now:now.toISOString(),until:until.toISOString(),end:end.toISOString(),\n    from:new Date(now.getTime()-86400000).toISOString().slice(0,10),to:new Date(end.getTime()+86400000).toISOString().slice(0,10),\n    year:now.getUTCFullYear(),end_year:end.getUTCFullYear(),events:[],warnings:[]}}];\n}\nconst source = {football:'Football needed?',basketball:'NBA needed?',f1:'F1 needed?',next:'Next year needed?'};\nif (source[STAGE]) {\n  const c = JSON.parse(JSON.stringify($(source[STAGE]).first().json));\n  const r = rows[0].json;\n  if (STAGE === 'football') {\n    if (r.error || !Array.isArray(r.matches)) {\n      c.warnings.push('Football calendar unavailable; inspect credentials and rerun the planner.');\n      return [{json:c}];\n    }\n    for (const m of r.matches) if (['SCHEDULED','TIMED'].includes(m.status) && m.homeTeam?.id && m.awayTeam?.id)\n      c.events.push({event_id:'football-'+m.id,provider_id:String(m.id),sport:'football',at:m.utcDate,\n        home_id:m.homeTeam.id,away_id:m.awayTeam.id,home:m.homeTeam.name,away:m.awayTeam.name,\n        title:m.homeTeam.name+' vs '+m.awayTeam.name,competition:m.competition?.name||'Football',\n        participants:[m.homeTeam.name,m.homeTeam.shortName,m.homeTeam.tla,m.awayTeam.name,m.awayTeam.shortName,m.awayTeam.tla].filter(Boolean)});\n  } else if (STAGE === 'basketball') {\n    for (const row of rows) {\n      const body=row.json.body||row.json;\n      if (row.json.error || body.error || !Array.isArray(body.data)) {\n        c.warnings.push('BALLDONTLIE calendar unavailable. Check credentials or rate limit, then rerun the planner.');\n        continue;\n      }\n      for (const g of body.data) {\n        if (g.postponed || (g.status_state && g.status_state!=='scheduled') || /final|postpon|cancel|suspend|abandon|delay/i.test(g.status||'')) continue;\n        if (!g.status_state && Number(g.period||0)!==0) continue;\n        if (!g.home_team?.id || !g.visitor_team?.id) continue;\n        c.events.push({event_id:'basketball-bdl-'+g.id,provider_id:String(g.id),sport:'basketball',at:g.datetime,\n          home_id:g.home_team.id,away_id:g.visitor_team.id,home:g.home_team.full_name,away:g.visitor_team.full_name,\n          title:g.home_team.full_name+' vs '+g.visitor_team.full_name,competition:'NBA',\n          participants:[g.home_team.full_name,g.home_team.name,g.home_team.abbreviation,g.visitor_team.full_name,g.visitor_team.name,g.visitor_team.abbreviation].filter(Boolean)});\n      }\n    }\n    const last=rows.at(-1).json;\n    if ((last.body||last).meta?.next_cursor!=null) c.warnings.push('NBA calendar pagination incomplete; rerun after fixing pagination.');\n  } else {\n    const races=r.MRData?.RaceTable?.Races;\n    if (r.error || !Array.isArray(races)) {\n      c.warnings.push('Jolpica F1 schedule unavailable; rerun the planner later.');\n      return [{json:c}];\n    }\n    for (const race of races) for (const [session,s] of [['Race',race],['Qualifying',race.Qualifying]]) {\n      if (!s?.time || !s.date) continue;\n      c.events.push({event_id:`f1-${race.season}-${race.round}-${session}`,sport:'f1',season:String(race.season),round:String(race.round),session,\n        at:s.date+'T'+s.time,title:race.raceName+' — '+session,competition:'Formula 1',participants:[],\n        circuit:race.Circuit?.circuitName||'',location:race.Circuit?.Location?.locality||''});\n    }\n  }\n  return [{json:c}];\n}\nif (STAGE === 'jobs') {\n  const c=rows[0].json, now=Date.now(), until=Date.parse(c.until), jobs=[], seen=new Set();\n  const norm=s=>String(s||'').normalize('NFD').replace(/[\\u0300-\\u036f]/g,'').toLowerCase().replace(/[^a-z0-9]/g,'');\n  const follows=(u,e)=>u.prefs.some(p=>p.sport===e.sport && (e.sport==='f1'||[...(p.aliases||[]),p.label].some(a=>e.participants.some(n=>norm(n)===norm(a)))));\n  for (const e of c.events) {\n    const at=Date.parse(e.at);\n    if (!Number.isFinite(at) || !String(e.at).includes('T') || !e.title || seen.has(e.event_id)) continue;\n    seen.add(e.event_id);\n    for (const kind of ['preview','start']) {\n      const due=at-(kind==='preview'?30*60000:0);\n      if (due<now-(kind==='preview'?5:3)*60000 || due>=until) continue;\n      if (!c.users.some(u=>(kind==='preview'?u.previews_enabled:u.reminders_enabled) && follows(u,e))) continue;\n      jobs.push({...e,kind,due_at:new Date(due).toISOString()});\n    }\n  }\n  jobs.sort((a,b)=>a.due_at.localeCompare(b.due_at));\n  return [{json:{jobs,warnings:c.warnings||[]}}];\n}\nthrow new Error('Unknown planner stage');\n"
+      },
+      "id": "6548e513-f25f-41d1-a14f-01bade7c8b09",
+      "name": "Read F1 calendar",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2464,
+        32
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "1d9a5e2d-b2d7-100f-a5b0-bc8048e316b8",
+              "leftValue": "={{ $json.year !== $json.end_year && $json.users.some(u => u.prefs.some(p => p.sport === 'f1')) }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "ebf33cce-47d5-467f-a63f-21452633c11c",
+      "name": "Next year needed?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        2688,
+        144
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{ 'https://api.jolpi.ca/ergast/f1/'+$json.end_year+'/races/?limit=100' }}",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          },
+          "timeout": 20000
+        }
+      },
+      "id": "7c9edfac-8a26-4832-8aa3-2517590934f9",
+      "name": "Get next-year F1 calendar",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2912,
+        32
+      ],
+      "notesInFlow": true,
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 2000,
+      "onError": "continueRegularOutput",
+      "notes": "Public Jolpica endpoint; no key."
+    },
+    {
+      "parameters": {
+        "jsCode": "const STAGE=\"next\";\n// Executed in an n8n Code node. The generator supplies the chosen STAGE.\nconst rows = $input.all();\nif (STAGE === 'init') {\n  const c = typeof rows[0].json.context === 'string' ? JSON.parse(rows[0].json.context) : rows[0].json.context;\n  if (!c.users.length) return [];\n  const now = new Date();\n  const until = new Date(now.getTime()+6*3600000);\n  const end = new Date(until.getTime()+30*60000);\n  return [{json:{...c,now:now.toISOString(),until:until.toISOString(),end:end.toISOString(),\n    from:new Date(now.getTime()-86400000).toISOString().slice(0,10),to:new Date(end.getTime()+86400000).toISOString().slice(0,10),\n    year:now.getUTCFullYear(),end_year:end.getUTCFullYear(),events:[],warnings:[]}}];\n}\nconst source = {football:'Football needed?',basketball:'NBA needed?',f1:'F1 needed?',next:'Next year needed?'};\nif (source[STAGE]) {\n  const c = JSON.parse(JSON.stringify($(source[STAGE]).first().json));\n  const r = rows[0].json;\n  if (STAGE === 'football') {\n    if (r.error || !Array.isArray(r.matches)) {\n      c.warnings.push('Football calendar unavailable; inspect credentials and rerun the planner.');\n      return [{json:c}];\n    }\n    for (const m of r.matches) if (['SCHEDULED','TIMED'].includes(m.status) && m.homeTeam?.id && m.awayTeam?.id)\n      c.events.push({event_id:'football-'+m.id,provider_id:String(m.id),sport:'football',at:m.utcDate,\n        home_id:m.homeTeam.id,away_id:m.awayTeam.id,home:m.homeTeam.name,away:m.awayTeam.name,\n        title:m.homeTeam.name+' vs '+m.awayTeam.name,competition:m.competition?.name||'Football',\n        participants:[m.homeTeam.name,m.homeTeam.shortName,m.homeTeam.tla,m.awayTeam.name,m.awayTeam.shortName,m.awayTeam.tla].filter(Boolean)});\n  } else if (STAGE === 'basketball') {\n    for (const row of rows) {\n      const body=row.json.body||row.json;\n      if (row.json.error || body.error || !Array.isArray(body.data)) {\n        c.warnings.push('BALLDONTLIE calendar unavailable. Check credentials or rate limit, then rerun the planner.');\n        continue;\n      }\n      for (const g of body.data) {\n        if (g.postponed || (g.status_state && g.status_state!=='scheduled') || /final|postpon|cancel|suspend|abandon|delay/i.test(g.status||'')) continue;\n        if (!g.status_state && Number(g.period||0)!==0) continue;\n        if (!g.home_team?.id || !g.visitor_team?.id) continue;\n        c.events.push({event_id:'basketball-bdl-'+g.id,provider_id:String(g.id),sport:'basketball',at:g.datetime,\n          home_id:g.home_team.id,away_id:g.visitor_team.id,home:g.home_team.full_name,away:g.visitor_team.full_name,\n          title:g.home_team.full_name+' vs '+g.visitor_team.full_name,competition:'NBA',\n          participants:[g.home_team.full_name,g.home_team.name,g.home_team.abbreviation,g.visitor_team.full_name,g.visitor_team.name,g.visitor_team.abbreviation].filter(Boolean)});\n      }\n    }\n    const last=rows.at(-1).json;\n    if ((last.body||last).meta?.next_cursor!=null) c.warnings.push('NBA calendar pagination incomplete; rerun after fixing pagination.');\n  } else {\n    const races=r.MRData?.RaceTable?.Races;\n    if (r.error || !Array.isArray(races)) {\n      c.warnings.push('Jolpica F1 schedule unavailable; rerun the planner later.');\n      return [{json:c}];\n    }\n    for (const race of races) for (const [session,s] of [['Race',race],['Qualifying',race.Qualifying]]) {\n      if (!s?.time || !s.date) continue;\n      c.events.push({event_id:`f1-${race.season}-${race.round}-${session}`,sport:'f1',season:String(race.season),round:String(race.round),session,\n        at:s.date+'T'+s.time,title:race.raceName+' — '+session,competition:'Formula 1',participants:[],\n        circuit:race.Circuit?.circuitName||'',location:race.Circuit?.Location?.locality||''});\n    }\n  }\n  return [{json:c}];\n}\nif (STAGE === 'jobs') {\n  const c=rows[0].json, now=Date.now(), until=Date.parse(c.until), jobs=[], seen=new Set();\n  const norm=s=>String(s||'').normalize('NFD').replace(/[\\u0300-\\u036f]/g,'').toLowerCase().replace(/[^a-z0-9]/g,'');\n  const follows=(u,e)=>u.prefs.some(p=>p.sport===e.sport && (e.sport==='f1'||[...(p.aliases||[]),p.label].some(a=>e.participants.some(n=>norm(n)===norm(a)))));\n  for (const e of c.events) {\n    const at=Date.parse(e.at);\n    if (!Number.isFinite(at) || !String(e.at).includes('T') || !e.title || seen.has(e.event_id)) continue;\n    seen.add(e.event_id);\n    for (const kind of ['preview','start']) {\n      const due=at-(kind==='preview'?30*60000:0);\n      if (due<now-(kind==='preview'?5:3)*60000 || due>=until) continue;\n      if (!c.users.some(u=>(kind==='preview'?u.previews_enabled:u.reminders_enabled) && follows(u,e))) continue;\n      jobs.push({...e,kind,due_at:new Date(due).toISOString()});\n    }\n  }\n  jobs.sort((a,b)=>a.due_at.localeCompare(b.due_at));\n  return [{json:{jobs,warnings:c.warnings||[]}}];\n}\nthrow new Error('Unknown planner stage');\n"
+      },
+      "id": "043b2495-e8f8-41e4-9cb1-f3146bc32b9a",
+      "name": "Read next-year F1 calendar",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3136,
+        32
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const STAGE=\"jobs\";\n// Executed in an n8n Code node. The generator supplies the chosen STAGE.\nconst rows = $input.all();\nif (STAGE === 'init') {\n  const c = typeof rows[0].json.context === 'string' ? JSON.parse(rows[0].json.context) : rows[0].json.context;\n  if (!c.users.length) return [];\n  const now = new Date();\n  const until = new Date(now.getTime()+6*3600000);\n  const end = new Date(until.getTime()+30*60000);\n  return [{json:{...c,now:now.toISOString(),until:until.toISOString(),end:end.toISOString(),\n    from:new Date(now.getTime()-86400000).toISOString().slice(0,10),to:new Date(end.getTime()+86400000).toISOString().slice(0,10),\n    year:now.getUTCFullYear(),end_year:end.getUTCFullYear(),events:[],warnings:[]}}];\n}\nconst source = {football:'Football needed?',basketball:'NBA needed?',f1:'F1 needed?',next:'Next year needed?'};\nif (source[STAGE]) {\n  const c = JSON.parse(JSON.stringify($(source[STAGE]).first().json));\n  const r = rows[0].json;\n  if (STAGE === 'football') {\n    if (r.error || !Array.isArray(r.matches)) {\n      c.warnings.push('Football calendar unavailable; inspect credentials and rerun the planner.');\n      return [{json:c}];\n    }\n    for (const m of r.matches) if (['SCHEDULED','TIMED'].includes(m.status) && m.homeTeam?.id && m.awayTeam?.id)\n      c.events.push({event_id:'football-'+m.id,provider_id:String(m.id),sport:'football',at:m.utcDate,\n        home_id:m.homeTeam.id,away_id:m.awayTeam.id,home:m.homeTeam.name,away:m.awayTeam.name,\n        title:m.homeTeam.name+' vs '+m.awayTeam.name,competition:m.competition?.name||'Football',\n        participants:[m.homeTeam.name,m.homeTeam.shortName,m.homeTeam.tla,m.awayTeam.name,m.awayTeam.shortName,m.awayTeam.tla].filter(Boolean)});\n  } else if (STAGE === 'basketball') {\n    for (const row of rows) {\n      const body=row.json.body||row.json;\n      if (row.json.error || body.error || !Array.isArray(body.data)) {\n        c.warnings.push('BALLDONTLIE calendar unavailable. Check credentials or rate limit, then rerun the planner.');\n        continue;\n      }\n      for (const g of body.data) {\n        if (g.postponed || (g.status_state && g.status_state!=='scheduled') || /final|postpon|cancel|suspend|abandon|delay/i.test(g.status||'')) continue;\n        if (!g.status_state && Number(g.period||0)!==0) continue;\n        if (!g.home_team?.id || !g.visitor_team?.id) continue;\n        c.events.push({event_id:'basketball-bdl-'+g.id,provider_id:String(g.id),sport:'basketball',at:g.datetime,\n          home_id:g.home_team.id,away_id:g.visitor_team.id,home:g.home_team.full_name,away:g.visitor_team.full_name,\n          title:g.home_team.full_name+' vs '+g.visitor_team.full_name,competition:'NBA',\n          participants:[g.home_team.full_name,g.home_team.name,g.home_team.abbreviation,g.visitor_team.full_name,g.visitor_team.name,g.visitor_team.abbreviation].filter(Boolean)});\n      }\n    }\n    const last=rows.at(-1).json;\n    if ((last.body||last).meta?.next_cursor!=null) c.warnings.push('NBA calendar pagination incomplete; rerun after fixing pagination.');\n  } else {\n    const races=r.MRData?.RaceTable?.Races;\n    if (r.error || !Array.isArray(races)) {\n      c.warnings.push('Jolpica F1 schedule unavailable; rerun the planner later.');\n      return [{json:c}];\n    }\n    for (const race of races) for (const [session,s] of [['Race',race],['Qualifying',race.Qualifying]]) {\n      if (!s?.time || !s.date) continue;\n      c.events.push({event_id:`f1-${race.season}-${race.round}-${session}`,sport:'f1',season:String(race.season),round:String(race.round),session,\n        at:s.date+'T'+s.time,title:race.raceName+' — '+session,competition:'Formula 1',participants:[],\n        circuit:race.Circuit?.circuitName||'',location:race.Circuit?.Location?.locality||''});\n    }\n  }\n  return [{json:c}];\n}\nif (STAGE === 'jobs') {\n  const c=rows[0].json, now=Date.now(), until=Date.parse(c.until), jobs=[], seen=new Set();\n  const norm=s=>String(s||'').normalize('NFD').replace(/[\\u0300-\\u036f]/g,'').toLowerCase().replace(/[^a-z0-9]/g,'');\n  const follows=(u,e)=>u.prefs.some(p=>p.sport===e.sport && (e.sport==='f1'||[...(p.aliases||[]),p.label].some(a=>e.participants.some(n=>norm(n)===norm(a)))));\n  for (const e of c.events) {\n    const at=Date.parse(e.at);\n    if (!Number.isFinite(at) || !String(e.at).includes('T') || !e.title || seen.has(e.event_id)) continue;\n    seen.add(e.event_id);\n    for (const kind of ['preview','start']) {\n      const due=at-(kind==='preview'?30*60000:0);\n      if (due<now-(kind==='preview'?5:3)*60000 || due>=until) continue;\n      if (!c.users.some(u=>(kind==='preview'?u.previews_enabled:u.reminders_enabled) && follows(u,e))) continue;\n      jobs.push({...e,kind,due_at:new Date(due).toISOString()});\n    }\n  }\n  jobs.sort((a,b)=>a.due_at.localeCompare(b.due_at));\n  return [{json:{jobs,warnings:c.warnings||[]}}];\n}\nthrow new Error('Unknown planner stage');\n"
+      },
+      "id": "68ef7dd9-7b30-4fec-ba39-89ebcd683888",
+      "name": "Build alert jobs",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3360,
+        144
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT jsonb_build_object('jobs',COALESCE(jsonb_agg(j),'[]'::jsonb),'warnings',$2::jsonb) AS context FROM sports_radar.plan_alert_jobs($1::jsonb) j;",
+        "options": {
+          "queryReplacement": "={{ [JSON.stringify($json.jobs),JSON.stringify($json.warnings)] }}"
+        }
+      },
+      "id": "005ccc5c-e0ce-4f09-ae86-5350469428f4",
+      "name": "Queue new alerts",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        3584,
+        144
+      ],
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 2000,
+      "credentials": {
+        "postgres": {
+          "id": "wTZcc2j0HldDEYQK",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const v=$input.first().json.context; const c=typeof v==='string'?JSON.parse(v):v; if(!c.jobs.length&&c.warnings.length)throw new Error(c.warnings.join(' ')); return c.jobs.map(json=>({json}));"
+      },
+      "id": "eea30619-c5f3-419e-9c16-ce5afb5dffff",
+      "name": "Unpack jobs",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3808,
+        144
+      ]
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "id": "68f22499-5343-49f6-a58d-917ea3f6ab02",
+      "name": "For each job",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [
+        4032,
+        144
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const warnings=$('Build alert jobs').first().json.warnings; if(warnings.length)throw new Error('Available events were queued, but: '+warnings.join(' ')); return [{json:{planned:true}}];"
+      },
+      "id": "ebffc14b-8723-4288-87d5-02853db72c44",
+      "name": "Report calendar warnings",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        4256,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "value": "nrX9ApZJULDGX1xZ",
+          "mode": "list",
+          "cachedResultUrl": "/workflow/nrX9ApZJULDGX1xZ",
+          "cachedResultName": "05B Sports Radar - Alert worker"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "job_id": "={{ Number($json.job_id) }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "job_id",
+              "displayName": "job_id",
+              "required": true,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "number"
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {
+          "waitForSubWorkflow": false
+        }
+      },
+      "id": "634ebd35-7ec8-49c1-a92e-fbd2dc4f8e70",
+      "name": "Start alert worker",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.3,
+      "position": [
+        4256,
+        192
+      ],
+      "notesInFlow": true,
+      "notes": "REQUIRED: select imported 05B Sports Radar - Alert worker. Keep Wait for Sub-Workflow Completion OFF. Loop Over Items supplies one job per invocation."
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Every six hours": {
+      "main": [
+        [
+          {
+            "node": "Load alert audience",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Plan now": {
+      "main": [
+        [
+          {
+            "node": "Load alert audience",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Load alert audience": {
+      "main": [
+        [
+          {
+            "node": "Prepare alert window",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare alert window": {
+      "main": [
+        [
+          {
+            "node": "Football needed?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Football needed?": {
+      "main": [
+        [
+          {
+            "node": "Get football calendar",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "NBA needed?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get football calendar": {
+      "main": [
+        [
+          {
+            "node": "Read football calendar",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read football calendar": {
+      "main": [
+        [
+          {
+            "node": "NBA needed?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "NBA needed?": {
+      "main": [
+        [
+          {
+            "node": "Get NBA calendar",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "F1 needed?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get NBA calendar": {
+      "main": [
+        [
+          {
+            "node": "Read NBA calendar",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read NBA calendar": {
+      "main": [
+        [
+          {
+            "node": "F1 needed?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "F1 needed?": {
+      "main": [
+        [
+          {
+            "node": "Get F1 calendar",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Next year needed?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get F1 calendar": {
+      "main": [
+        [
+          {
+            "node": "Read F1 calendar",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read F1 calendar": {
+      "main": [
+        [
+          {
+            "node": "Next year needed?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Next year needed?": {
+      "main": [
+        [
+          {
+            "node": "Get next-year F1 calendar",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build alert jobs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get next-year F1 calendar": {
+      "main": [
+        [
+          {
+            "node": "Read next-year F1 calendar",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read next-year F1 calendar": {
+      "main": [
+        [
+          {
+            "node": "Build alert jobs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build alert jobs": {
+      "main": [
+        [
+          {
+            "node": "Queue new alerts",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Queue new alerts": {
+      "main": [
+        [
+          {
+            "node": "Unpack jobs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Unpack jobs": {
+      "main": [
+        [
+          {
+            "node": "For each job",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "For each job": {
+      "main": [
+        [
+          {
+            "node": "Report calendar warnings",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Start alert worker",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Start alert worker": {
+      "main": [
+        [
+          {
+            "node": "For each job",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "timeSavedMode": "fixed",
+    "errorWorkflow": "fAG5yPnBOyIugGks",
+    "callerPolicy": "workflowsFromSameOwner",
+    "availableInMCP": false
+  },
+  "versionId": "2ab9419d-33a6-4144-b28c-4dc5995f6e24",
+  "meta": {
+    "instanceId": "7f5b4816cf946ff530226ad8173417053f6c6a61e7a2cb6ce6af47a8f65f31ed"
+  },
+  "nodeGroups": [],
+  "id": "CLIbFNpKzavqSvEa",
+  "tags": []
+}

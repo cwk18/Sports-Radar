@@ -1,0 +1,125 @@
+{
+  "name": "04 Sports Radar - Error alert",
+  "nodes": [
+    {
+      "parameters": {
+        "content": "## Owner alerts\nIn Notify project owner, select your Telegram credential and replace the chat ID. Obtain your ID from Telegram message → output → message.chat.id after a private /start.\n\nSelect this workflow in workflows 01, 02 and 03 Settings → Error workflow. No need to publish this error-only workflow. Automatic errors trigger it; manual test errors do not.",
+        "height": 170,
+        "width": 1000
+      },
+      "id": "e27e88fd-f713-40d4-afd5-5b3a9ca913ea",
+      "name": "Read me",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        0,
+        64
+      ]
+    },
+    {
+      "parameters": {},
+      "id": "baaa9b1a-3ea9-40fe-9e75-7fa293d555a5",
+      "name": "Workflow failed",
+      "type": "n8n-nodes-base.errorTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        368
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const e=$input.first().json;\n// Owner receives only workflow/node names and the execution link, not secret-bearing raw errors.\nconst text='Sports Radar needs attention.\\nWorkflow: '+(e.workflow?.name||'Unknown')+'\\nNode: '+(e.execution?.lastNodeExecuted||e.trigger?.error?.node?.name||'Trigger')+'\\nOpen the failed execution in n8n to investigate.\\n'+(e.execution?.url||'');\nreturn [{json:{text:text.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}}];"
+      },
+      "id": "3a6d3471-397f-432a-8350-448cbf819b41",
+      "name": "Prepare owner alert",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        272,
+        368
+      ]
+    },
+    {
+      "parameters": {
+        "chatId": "8798971457",
+        "text": "={{ $json.text }}",
+        "replyMarkup": "inlineKeyboard",
+        "inlineKeyboard": {
+          "rows": [
+            {
+              "row": {
+                "buttons": [
+                  {
+                    "text": "🏠 Home",
+                    "additionalFields": {
+                      "callback_data": "menu:sports"
+                    }
+                  }
+                ]
+              }
+            }
+          ]
+        },
+        "additionalFields": {
+          "appendAttribution": false,
+          "parse_mode": "HTML"
+        }
+      },
+      "id": "8f1f3a74-2732-47a1-8ed6-f1e4e3d73e2b",
+      "name": "Notify project owner",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        528,
+        368
+      ],
+      "notesInFlow": true,
+      "webhookId": "f5919a21-bd9a-47a0-bbae-3f8068960e8d",
+      "credentials": {
+        "telegramApi": {
+          "id": "S4RpggWlw9PWBEfq",
+          "name": "Telegram account"
+        }
+      },
+      "notes": "Select the same Telegram bot credential everywhere."
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Workflow failed": {
+      "main": [
+        [
+          {
+            "node": "Prepare owner alert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare owner alert": {
+      "main": [
+        [
+          {
+            "node": "Notify project owner",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "versionId": "07b9013b-4112-48bc-8d4c-c5cc19fbb676",
+  "meta": {
+    "instanceId": "7f5b4816cf946ff530226ad8173417053f6c6a61e7a2cb6ce6af47a8f65f31ed"
+  },
+  "nodeGroups": [],
+  "id": "fAG5yPnBOyIugGks",
+  "tags": []
+}

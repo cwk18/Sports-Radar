@@ -1,0 +1,40 @@
+PASS 01 valid graph and JavaScript
+PASS 01 exported timezone compatibility and bounded external retries
+PASS 02 valid graph and JavaScript
+PASS 02 exported timezone compatibility and bounded external retries
+PASS 03 valid graph and JavaScript
+PASS 03 exported timezone compatibility and bounded external retries
+PASS 04 valid graph and JavaScript
+PASS 04 exported timezone compatibility and bounded external retries
+PASS 05 valid graph and JavaScript
+PASS 05 exported timezone compatibility and bounded external retries
+PASS 05B valid graph and JavaScript
+PASS 05B exported timezone compatibility and bounded external retries
+PASS /start routes correctly
+PASS /events routes correctly
+PASS /myteams routes correctly
+PASS /daily off routes correctly
+PASS /previews off routes correctly
+PASS /reminders on routes correctly
+PASS /alerts routes correctly
+PASS Unknown command returns useful help
+PASS Missing daily argument returns usage
+PASS Group messages are ignored
+PASS Home callback returns welcome
+PASS AI accepts the exact overview schema
+PASS AI rejects invalid output 24
+PASS AI rejects invalid output 25
+PASS AI rejects invalid output 26
+PASS AI rejects invalid output 27
+PASS AI rejects invalid output 28
+PASS AI rejects invalid output 29
+PASS AI rejects invalid output 30
+PASS AI API failure takes the fallback
+PASS Fallback preserves the verified calendar list
+PASS Sub-workflow inputs are declared and mapped
+PASS Telegram spacing is one second
+PASS All operational workflows link to the error workflow
+PASS All user messages have navigation and attribution is disabled
+PASS No obvious embedded secrets in exported workflows
+
+38 checks passed. These are local checks, not a claim of live provider availability.

@@ -1,0 +1,2876 @@
+{
+  "name": "01 Sports Radar - Telegram commands",
+  "nodes": [
+    {
+      "parameters": {
+        "updates": [
+          "message",
+          "callback_query"
+        ],
+        "additionalFields": {}
+      },
+      "id": "b8c0e009-6528-42be-b55a-37bd56638ef4",
+      "name": "Telegram message",
+      "type": "n8n-nodes-base.telegramTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        13568,
+        5696
+      ],
+      "webhookId": "580ca9a8-1d84-4c14-ad5f-f5642d6ac1d8",
+      "credentials": {
+        "telegramApi": {
+          "id": "S4RpggWlw9PWBEfq",
+          "name": "Telegram account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const update = $input.first().json.update || $input.first().json;\nconst callback = update.callback_query;\nconst message = callback?.message || update.message;\nif (!message || message.chat?.type !== 'private') return [];\nif (!callback && typeof message.text !== 'string') return [];\nconst result = {\n  chat_id: String(message.chat.id), action: 'help', sport: '', team_key: '',\n  label: '', aliases: [], daily: false, route: 'home',\n  is_callback: Boolean(callback),\n  reply: `Welcome to Sports Radar 👋\n\nFollow your favourite teams and F1 drivers, and get a personalised preview before they compete, what to expect, who to watch, and the key matchups.\n\nWhich sport would you like to follow first?`\n};\n// These values are the contract between the existing Telegram buttons and the router.\nconst exactRoutes = {\n  'sport:football': 'football_menu', 'sport:basketball': 'nba_menu',\n  'sport:f1': 'f1_menu', 'menu:follows': 'my_follows', 'menu:sports': 'home'\n};\nif (callback) {\n  const data = typeof callback.data === 'string' ? callback.data : '';\n  result.route = exactRoutes[data] || 'home';\n  if (/^league:(PL|PD|SA|BL1|FL1)$/.test(data)) result.route = 'football_teams';\n  if (/^follow:football:[1-9][0-9]*$/.test(data)) result.route = 'follow_football';\n  if (/^follow:basketball:[1-9][0-9]*$/.test(data)) result.route = 'follow_nba';\n  if (/^follow:f1:[a-zA-Z0-9_-]{1,48}$/.test(data)) result.route = 'follow_f1';\n  const manage = /^manage:follows:([0-9]{1,6})$/.exec(data);\n  if (manage) { result.route = 'manage_follows'; result.page = Number(manage[1]); }\n  // Short sport codes keep callback data within Telegram's 64-byte limit.\n  const removal = /^unfollow:([fbr]):([a-zA-Z0-9_-]{1,48})$/.exec(data);\n  if (removal) {\n    result.route = 'unfollow'; result.action = 'unfollow';\n    result.sport = {f:'football',b:'basketball',r:'f1'}[removal[1]];\n    result.team_key = removal[2];\n  }\n\n} else {\n  const command = message.text.trim().split(/\\s+/)[0].toLowerCase().split('@')[0];\n  if (command === '/myteams') result.route = 'my_follows';\n  // Retain access to the existing briefing subworkflow; configure/test 02 separately.\n  if (command === '/events') {\n    result.route = 'events'; result.action = 'events'; result.reply = '';\n  }\n}\nif (!callback) {\n  const parts = message.text.trim().toLowerCase().split(/\\s+/);\n  const command = parts[0].split('@')[0];\n\n  if (command === '/daily') {\n    if (parts.length === 2 && ['on', 'off'].includes(parts[1])) {\n      result.route = 'daily';\n      result.action = 'daily';\n      result.daily = parts[1] === 'on';\n      result.reply = result.daily\n        ? '✅ Daily digest preference saved: ON.'\n        : '🔕 Daily digest preference saved: OFF.';\n    } else {\n      result.route = 'home';\n      result.reply = 'Use /daily on to enable the daily digest, or /daily off to disable it.';\n    }\n  }\n}\nif (callback?.data === 'menu:events') {\n  result.route = 'events';\n  result.action = 'events';\n  result.reply = '';\n}\nif (!callback) {\n  const tokens = message.text.trim().toLowerCase().split(/\\s+/);\n  const command = tokens[0].split('@')[0];\n\n  if (['/previews', '/reminders', '/quiet', '/alerts'].includes(command)) {\n    result.route = 'alert_settings';\n    result.alert_command = command.slice(1);\n    result.alert_value =\n      tokens.length === 2 && ['on', 'off'].includes(tokens[1])\n        ? tokens[1]\n        : 'status';\n  }\n}\nif (!callback) {\n  const parts = message.text.trim().toLowerCase().split(/\\s+/);\n  const cmd = parts[0].split('@')[0];\n  const known = ['/start','/help','/myteams','/events','/daily','/alerts','/previews','/reminders','/quiet','/demoerror'];\n  if (!known.includes(cmd)) {\n    result.route='home';\n    result.reply='Unknown command. Use /start for the menu, /events for upcoming events, /myteams for saved follows, /daily on or /daily off, and /alerts for preview and reminder settings.';\n  } else if (cmd==='/demoerror') {\n    result.route='demo_failure';result.reply='';\n  } else if (cmd==='/help') {\n    result.reply='Sports Radar commands\\n\\n/start — home menu\\n/events — next seven days\\n/myteams — saved follows\\n/daily on or /daily off — daily digest\\n/previews on or /previews off — previews\\n/reminders on or /reminders off — start reminders\\n/quiet on or /quiet off — overnight alerts\\n/alerts — current alert settings\\n\\nChoose teams and drivers using the menu buttons.';\n  }\n}\nreturn [{json: result}];\n"
+      },
+      "id": "cdb0161b-18e1-4260-ba1c-c52ad03d5b5c",
+      "name": "Understand command",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        14016,
+        5696
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "a813f08f-9ffd-49b3-8f2c-98392dd9c51c",
+              "leftValue": "={{ $json.is_callback }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "67c072bc-e6e3-4005-8276-1bf3bd5d8262",
+      "name": "Button click?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        14688,
+        5696
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "callback",
+        "queryId": "={{ $('Telegram message').first().json.callback_query.id }}",
+        "additionalFields": {}
+      },
+      "id": "90c7328d-da49-4a9d-81cd-8a1d197cdcf1",
+      "name": "Acknowledge button",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        14912,
+        5632
+      ],
+      "webhookId": "4720dc52-5758-44af-916e-ffab6c415a58",
+      "credentials": {
+        "telegramApi": {
+          "id": "S4RpggWlw9PWBEfq",
+          "name": "Telegram account"
+        }
+      },
+      "onError": "continueRegularOutput",
+      "notes": "Acknowledges each button once, before API calls. An expired callback must not block processing."
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "014bc042-60d2-413b-a761-9e154e63a067",
+                    "leftValue": "={{ $('Understand command').first().json.route }}",
+                    "rightValue": "football_menu",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "Football leagues"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "8d33290c-125e-4b23-b15d-02d9a8e73834",
+                    "leftValue": "={{ $('Understand command').first().json.route }}",
+                    "rightValue": "football_teams",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "Football teams"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "3d5d80e8-0a0b-4880-a0dc-d20fc5611697",
+                    "leftValue": "={{ $('Understand command').first().json.route }}",
+                    "rightValue": "nba_menu",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "NBA teams"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "d83f6b78-1dec-4e4d-ab41-bd36b3ff4613",
+                    "leftValue": "={{ $('Understand command').first().json.route }}",
+                    "rightValue": "f1_menu",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "F1 drivers"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "17d064f1-43ae-4797-9230-626b3e9d6a16",
+                    "leftValue": "={{ $('Understand command').first().json.route }}",
+                    "rightValue": "follow_football",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "Follow football"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "a7165bda-6d85-48c5-8b69-f23946cab49c",
+                    "leftValue": "={{ $('Understand command').first().json.route }}",
+                    "rightValue": "follow_nba",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "Follow NBA"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "de380d20-ae21-4b1e-a464-4b03242308c2",
+                    "leftValue": "={{ $('Understand command').first().json.route }}",
+                    "rightValue": "follow_f1",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "Follow F1"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "2794adbb-55f2-4d67-806b-b5556da3f6eb",
+                    "leftValue": "={{ $('Understand command').first().json.route }}",
+                    "rightValue": "my_follows",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "My follows"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "d4da9306-89fc-4476-8ac2-1d11119627d0",
+                    "leftValue": "={{ $('Understand command').first().json.route }}",
+                    "rightValue": "events",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "Briefing"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "9e1b6ab3-061b-4f59-a4a3-36f8ccaaf1f6",
+                    "leftValue": "={{ $('Understand command').first().json.route }}",
+                    "rightValue": "manage_follows",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "Choose unfollow"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "e2c4472b-96b6-4cec-94e8-32bc03a4dd11",
+                    "leftValue": "={{ $('Understand command').first().json.route }}",
+                    "rightValue": "unfollow",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "Remove follow"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "fc9b6587-06f3-48a8-9904-b32cb2892317",
+                    "leftValue": "={{ $('Understand command').first().json.route }}",
+                    "rightValue": "daily",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals",
+                      "name": "filter.operator.equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "Daily setting"
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": "extra",
+          "renameFallbackOutput": "Welcome / back",
+          "allMatchingOutputs": false
+        }
+      },
+      "name": "Route request",
+      "id": "8544c0f9-a11f-49cc-b72d-d5c9925ea227",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "position": [
+        15136,
+        5520
+      ],
+      "notes": "Each update takes exactly one route. The named parser reference preserves context after Telegram acknowledgment."
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $('Understand command').first().json.chat_id }}",
+        "text": "⚽ Football\n\nWhich league would you like to follow?",
+        "replyMarkup": "inlineKeyboard",
+        "inlineKeyboard": {
+          "rows": [
+            {
+              "row": {
+                "buttons": [
+                  {
+                    "text": "Premier League",
+                    "additionalFields": {
+                      "callback_data": "league:PL"
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "row": {
+                "buttons": [
+                  {
+                    "text": "La Liga",
+                    "additionalFields": {
+                      "callback_data": "league:PD"
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "row": {
+                "buttons": [
+                  {
+                    "text": "Serie A",
+                    "additionalFields": {
+                      "callback_data": "league:SA"
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "row": {
+                "buttons": [
+                  {
+                    "text": "Bundesliga",
+                    "additionalFields": {
+                      "callback_data": "league:BL1"
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "row": {
+                "buttons": [
+                  {
+                    "text": "Ligue 1",
+                    "additionalFields": {
+                      "callback_data": "league:FL1"
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "row": {
+                "buttons": [
+                  {
+                    "text": "🏠 Home",
+                    "additionalFields": {
+                      "callback_data": "menu:sports"
+                    }
+                  }
+                ]
+              }
+            }
+          ]
+        },
+        "additionalFields": {
+          "appendAttribution": false,
+          "parse_mode": "HTML"
+        }
+      },
+      "id": "a0876600-68e5-42db-9da9-026683367918",
+      "name": "Choose football league",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        15360,
+        4640
+      ],
+      "webhookId": "52a61ee6-7154-43ce-9be1-682b81c5e34d",
+      "credentials": {
+        "telegramApi": {
+          "id": "S4RpggWlw9PWBEfq",
+          "name": "Telegram account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "url": "={{ 'https://api.football-data.org/v4/competitions/' + $('Telegram message').first().json.callback_query.data.split(':')[1] + '/teams' }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        15360,
+        4832
+      ],
+      "id": "ad3f424e-c421-481e-af83-c05f09dac728",
+      "name": "Get league teams",
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 2000,
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "7wt6MVOxTYTeHeVI",
+          "name": "Football API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "url": "https://v2.nba.api-sports.io/teams?league=standard",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        15360,
+        5024
+      ],
+      "id": "ae3e6850-9c2e-4df2-9659-097df8a33c88",
+      "name": "Get NBA teams",
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 15000,
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "9xiwBR3SxTN9Lrbk",
+          "name": "Sports API Key"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "url": "https://api.jolpi.ca/ergast/f1/current/last/results/",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        15360,
+        5216
+      ],
+      "id": "9fef7aa8-8141-4b35-b38b-8434f42da34a",
+      "name": "Get F1 Drivers",
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "url": "={{ 'https://api.football-data.org/v4/teams/' + $('Telegram message').first().json.callback_query.data.split(':')[2] }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          },
+          "timeout": 20000
+        }
+      },
+      "id": "8bc4ee9e-99a2-4fd0-8fe4-cbfca497409a",
+      "name": "Get selected football team",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        15360,
+        5408
+      ],
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 7000,
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "7wt6MVOxTYTeHeVI",
+          "name": "Football API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "url": "={{ 'https://v2.nba.api-sports.io/teams?id=' + $('Telegram message').first().json.callback_query.data.split(':')[2] }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          },
+          "timeout": 20000
+        }
+      },
+      "id": "701370ca-79c8-4078-b772-46c96e75d827",
+      "name": "Get selected NBA team",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        15360,
+        5600
+      ],
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 15000,
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "9xiwBR3SxTN9Lrbk",
+          "name": "Sports API Key"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "url": "={{ 'https://api.jolpi.ca/ergast/f1/drivers/' + encodeURIComponent($('Telegram message').first().json.callback_query.data.split(':')[2]) + '/' }}",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          },
+          "timeout": 20000
+        }
+      },
+      "id": "752bf82f-479e-49a1-a684-18ab44d263af",
+      "name": "Get selected F1 driver",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        15360,
+        5792
+      ],
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT $1::text AS chat_id, COALESCE(jsonb_agg(jsonb_build_object('sport', f.sport, 'team_key', f.team_key, 'label', f.label) ORDER BY f.sport, f.label), '[]'::jsonb) AS prefs FROM sports_radar.follows AS f WHERE f.chat_id = $1::text;",
+        "options": {
+          "queryReplacement": "={{ [$('Understand command').first().json.chat_id] }}"
+        }
+      },
+      "id": "5a355252-94b1-47e7-8925-61d4e503d5e2",
+      "name": "Load my follows",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        15360,
+        5984
+      ],
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 2000,
+      "credentials": {
+        "postgres": {
+          "id": "wTZcc2j0HldDEYQK",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT sports_radar.command($1::jsonb) AS context;",
+        "options": {
+          "queryReplacement": "={{ [JSON.stringify($('Understand command').first().json)] }}"
+        }
+      },
+      "id": "016ec2c0-e618-4054-885f-45c303c3a2ea",
+      "name": "Save command and load preferences",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        15360,
+        6176
+      ],
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 2000,
+      "credentials": {
+        "postgres": {
+          "id": "wTZcc2j0HldDEYQK",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const data = $input.first().json;\nconst update = $('Telegram message').first().json;\nconst callback = update.callback_query;\nif (!callback || callback.message?.chat?.type !== 'private') return [];\nconst league = callback.data?.split(':')[1];\nconst labels = {PL:'Premier League',PD:'La Liga',SA:'Serie A',BL1:'Bundesliga',FL1:'Ligue 1'};\nif (!labels[league] || data.competition?.code !== league) {\n  throw new Error('The returned league does not match the selected button. Check Get league teams URL.');\n}\nif (!Array.isArray(data.teams)) throw new Error('The API did not return a team list.');\nconst seen = new Set();\nconst teams = data.teams.map(t => {\n  if (!Number.isSafeInteger(t.id) || t.id <= 0 || !t.name || seen.has(t.id)) {\n    throw new Error('The API returned an invalid or duplicate team.');\n  }\n  seen.add(t.id);\n  return {id:t.id, label:String(t.shortName || t.name), name:String(t.name)};\n}).sort((a,b) => a.label.localeCompare(b.label, 'en'));\n// These menu layouts cover 18- and 20-team leagues. Fail explicitly if coverage changes.\nif (![18,20].includes(teams.length)) {\n  throw new Error('Received ' + teams.length + ' teams. This menu needs an updated layout before sending.');\n}\nreturn [{json:{\n  chat_id:String(callback.message.chat.id),\n  callback_id:callback.id,\n  league,\n  team_count:teams.length,\n  teams,\n  text:'⚽ ' + labels[league] + '\\n\\nWhich team would you like to follow?'\n}}];"
+      },
+      "id": "e0e0cf2e-1a4b-4fbd-a0a4-710d46cc9376",
+      "name": "Prepare football teams",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        15584,
+        4832
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "b48f69a5-640e-46bb-93cf-fc59718847e8",
+              "leftValue": "={{ $json.team_count }}",
+              "rightValue": 20,
+              "operator": {
+                "type": "number",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "ec3034e5-afa8-4698-9582-18cc7d1c6326",
+      "name": "20 teams?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        15808,
+        4832
+      ]
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $json.chat_id }}",
+        "text": "={{ $json.text }}",
+        "replyMarkup": "inlineKeyboard",
+        "inlineKeyboard": {
+          "rows": [
+            {
+              "row": {
+                "buttons": [
+                  {
+                    "text": "={{ $json.teams[0].label }}",
+                    "additionalFields": {
+                      "callback_data": "={{ 'follow:football:' + $json.teams[0].id }}"
+                    }
+                  },
+                  {
+                    "text": "={{ $json.teams[1].label }}",
+                    "additionalFields": {
+                      "callback_data": "={{ 'follow:football:' + $json.teams[1].id }}"
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "row": {
+                "buttons": [
+                  {
+                    "text": "={{ $json.teams[2].label }}",
+                    "additionalFields": {
+                      "callback_data": "={{ 'follow:football:' + $json.teams[2].id }}"
+                    }
+                  },
+                  {
+                    "text": "={{ $json.teams[3].label }}",
+                    "additionalFields": {
+                      "callback_data": "={{ 'follow:football:' + $json.teams[3].id }}"
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "row": {
+                "buttons": [
+                  {
+                    "text": "={{ $json.teams[4].label }}",
+                    "additionalFields": {
+                      "callback_data": "={{ 'follow:football:' + $json.teams[4].id }}"
+                    }
+                  },
+                  {
+                    "text": "={{ $json.teams[5].label }}",
+                    "additionalFields": {
+                      "callback_data": "={{ 'follow:football:' + $json.teams[5].id }}"
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "row": {
+                "buttons": [
+                  {
+                    "text": "={{ $json.teams[6].label }}",
+                    "additionalFields": {
+                      "callback_data": "={{ 'follow:football:' + $json.teams[6].id }}"
+                    }
+                  },
+                  {
+                    "text": "={{ $json.teams[7].label }}",
+                    "additionalFields": {
+                      "callback_data": "={{ 'follow:football:' + $json.teams[7].id }}"
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "row": {
+                "buttons": [
+                  {
+                    "text": "={{ $json.teams[8].label }}",
+                    "additionalFields": {
+                      "callback_data": "={{ 'follow:football:' + $json.teams[8].id }}"
+                    }
+                  },
+                  {
+                    "text": "={{ $json.teams[9].label }}",
+                    "additionalFields": {
+                      "callback_data": "={{ 'follow:football:' + $json.teams[9].id }}"
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "row": {
+                "buttons": [
+                  {
+                    "text": "={{ $json.teams[10].label }}",
+                    "additionalFields": {
+                      "callback_data": "={{ 'follow:football:' + $json.teams[10].id }}"
+                    }
+                  },
+                  {
+                    "text": "={{ $json.teams[11].label }}",
+                    "additionalFields": {
+                      "callback_data": "={{ 'follow:football:' + $json.teams[11].id }}"
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "row": {
+                "buttons": [
+                  {
+                    "text": "={{ $json.teams[12].label }}",
+                    "additionalFields": {
+                      "callback_data": "={{ 'follow:football:' + $json.teams[12].id }}"
+                    }
+                  },
+                  {
+                    "text": "={{ $json.teams[13].label }}",
+                    "additionalFields": {
+                      "callback_data": "={{ 'follow:football:' + $json.teams[13].id }}"
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "row": {
+                "buttons": [
+                  {
+                    "text": "={{ $json.teams[14].label }}",
+                    "additionalFields": {
+                      "callback_data": "={{ 'follow:football:' + $json.teams[14].id }}"
+                    }
+                  },
+                  {
+                    "text": "={{ $json.teams[15].label }}",
+                    "additionalFields": {
+                      "callback_data": "={{ 'follow:football:' + $json.teams[15].id }}"
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "row": {
+                "buttons": [
+                  {
+                    "text": "={{ $json.teams[16].label }}",
+                    "additionalFields": {
+                      "callback_data": "={{ 'follow:football:' + $json.teams[16].id }}"
+                    }
+                  },
+                  {
+                    "text": "={{ $json.teams[17].label }}",
+                    "additionalFields": {
+                      "callback_data": "={{ 'follow:football:' + $json.teams[17].id }}"
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "row": {
+                "buttons": [
+                  {
+                    "text": "={{ $json.teams[18].label }}",
+                    "additionalFields": {
+                      "callback_data": "={{ 'follow:football:' + $json.teams[18].id }}"
+                    }
+                  },
+                  {
+                    "text": "={{ $json.teams[19].label }}",
+                    "additionalFields": {
+                      "callback_data": "={{ 'follow:football:' + $json.teams[19].id }}"
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "row": {
+                "buttons": [
+                  {
+                    "text": "⬅️ Back to leagues",
+                    "additionalFields": {
+                      "callback_data": "sport:football"
+                    }
+                  },
+                  {
+                    "text": "🏠 Home",
+                    "additionalFields": {
+                      "callback_data": "menu:sports"
+                    }
+                  }
+                ]
+              }
+            }
+          ]
+        },
+        "additionalFields": {
+          "appendAttribution": false,
+          "parse_mode": "HTML"
+        }
+      },
+      "id": "8a70d00d-72be-4959-bcc2-2ae0a6480da6",
+      "name": "Send 20-team menu",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        16032,
+        4736
+      ],
+      "webhookId": "2268938b-2d6e-4a40-9f4d-39a0e9966af5",
+      "credentials": {
+        "telegramApi": {
+          "id": "S4RpggWlw9PWBEfq",
+          "name": "Telegram account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $json.chat_id }}",
+        "text": "={{ $json.text }}",
+        "replyMarkup": "inlineKeyboard",
+        "inlineKeyboard": {
+          "rows": [
+            {
+              "row": {
+                "buttons": [
+                  {
+                    "text": "={{ $json.teams[0].label }}",
+                    "additionalFields": {
+                      "callback_data": "={{ 'follow:football:' + $json.teams[0].id }}"
+                    }
+                  },
+                  {
+                    "text": "={{ $json.teams[1].label }}",
+                    "additionalFields": {
+                      "callback_data": "={{ 'follow:football:' + $json.teams[1].id }}"
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "row": {
+                "buttons": [
+                  {
+                    "text": "={{ $json.teams[2].label }}",
+                    "additionalFields": {
+                      "callback_data": "={{ 'follow:football:' + $json.teams[2].id }}"
+                    }
+                  },
+                  {
+                    "text": "={{ $json.teams[3].label }}",
+                    "additionalFields": {
+                      "callback_data": "={{ 'follow:football:' + $json.teams[3].id }}"
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "row": {
+                "buttons": [
+                  {
+                    "text": "={{ $json.teams[4].label }}",
+                    "additionalFields": {
+                      "callback_data": "={{ 'follow:football:' + $json.teams[4].id }}"
+                    }
+                  },
+                  {
+                    "text": "={{ $json.teams[5].label }}",
+                    "additionalFields": {
+                      "callback_data": "={{ 'follow:football:' + $json.teams[5].id }}"
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "row": {
+                "buttons": [
+                  {
+                    "text": "={{ $json.teams[6].label }}",
+                    "additionalFields": {
+                      "callback_data": "={{ 'follow:football:' + $json.teams[6].id }}"
+                    }
+                  },
+                  {
+                    "text": "={{ $json.teams[7].label }}",
+                    "additionalFields": {
+                      "callback_data": "={{ 'follow:football:' + $json.teams[7].id }}"
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "row": {
+                "buttons": [
+                  {
+                    "text": "={{ $json.teams[8].label }}",
+                    "additionalFields": {
+                      "callback_data": "={{ 'follow:football:' + $json.teams[8].id }}"
+                    }
+                  },
+                  {
+                    "text": "={{ $json.teams[9].label }}",
+                    "additionalFields": {
+                      "callback_data": "={{ 'follow:football:' + $json.teams[9].id }}"
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "row": {
+                "buttons": [
+                  {
+                    "text": "={{ $json.teams[10].label }}",
+                    "additionalFields": {
+                      "callback_data": "={{ 'follow:football:' + $json.teams[10].id }}"
+                    }
+                  },
+                  {
+                    "text": "={{ $json.teams[11].label }}",
+                    "additionalFields": {
+                      "callback_data": "={{ 'follow:football:' + $json.teams[11].id }}"
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "row": {
+                "buttons": [
+                  {
+                    "text": "={{ $json.teams[12].label }}",
+                    "additionalFields": {
+                      "callback_data": "={{ 'follow:football:' + $json.teams[12].id }}"
+                    }
+                  },
+                  {
+                    "text": "={{ $json.teams[13].label }}",
+                    "additionalFields": {
+                      "callback_data": "={{ 'follow:football:' + $json.teams[13].id }}"
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "row": {
+                "buttons": [
+                  {
+                    "text": "={{ $json.teams[14].label }}",
+                    "additionalFields": {
+                      "callback_data": "={{ 'follow:football:' + $json.teams[14].id }}"
+                    }
+                  },
+                  {
+                    "text": "={{ $json.teams[15].label }}",
+                    "additionalFields": {
+                      "callback_data": "={{ 'follow:football:' + $json.teams[15].id }}"
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "row": {
+                "buttons": [
+                  {
+                    "text": "={{ $json.teams[16].label }}",
+                    "additionalFields": {
+                      "callback_data": "={{ 'follow:football:' + $json.teams[16].id }}"
+                    }
+                  },
+                  {
+                    "text": "={{ $json.teams[17].label }}",
+                    "additionalFields": {
+                      "callback_data": "={{ 'follow:football:' + $json.teams[17].id }}"
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "row": {
+                "buttons": [
+                  {
+                    "text": "⬅️ Back to leagues",
+                    "additionalFields": {
+                      "callback_data": "sport:football"
+                    }
+                  },
+                  {
+                    "text": "🏠 Home",
+                    "additionalFields": {
+                      "callback_data": "menu:sports"
+                    }
+                  }
+                ]
+              }
+            }
+          ]
+        },
+        "additionalFields": {
+          "appendAttribution": false,
+          "parse_mode": "HTML"
+        }
+      },
+      "id": "d6901b8e-c37d-46d1-909c-b6b0e01cd31a",
+      "name": "Send 18-team menu",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        16032,
+        5024
+      ],
+      "webhookId": "81c7bd4d-1066-4655-a026-907ad5fbdd45",
+      "credentials": {
+        "telegramApi": {
+          "id": "S4RpggWlw9PWBEfq",
+          "name": "Telegram account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const data = $input.first().json;\nconst callback = $('Telegram message').first().json.callback_query;\n\nif (!callback || callback.message?.chat?.type !== 'private') return [];\nif (callback.data !== 'sport:basketball') return [];\n\nif (data.errors && Object.keys(data.errors).length) {\n  throw new Error('NBA API error: ' + JSON.stringify(data.errors));\n}\n\nif (!Array.isArray(data.response)) {\n  throw new Error('The NBA API did not return a team list.');\n}\n\nconst seen = new Set();\n\nconst teams = data.response\n  .filter(t => t.nbaFranchise === true && t.allStar !== true)\n  .map(t => {\n    if (\n      !Number.isSafeInteger(t.id) ||\n      t.id <= 0 ||\n      typeof t.name !== 'string' ||\n      !t.name.trim() ||\n      seen.has(t.id)\n    ) {\n      throw new Error('The NBA API returned an invalid or duplicate team.');\n    }\n\n    seen.add(t.id);\n\n    const name = t.name.trim();\n    const label =\n      typeof t.nickname === 'string' && t.nickname.trim()\n        ? t.nickname.trim()\n        : name;\n\n    return { id: t.id, name, label };\n  })\n  .sort((a, b) => a.name.localeCompare(b.name, 'en'));\n\nif (teams.length !== 30) {\n  throw new Error(\n    'Expected 30 NBA franchises but found ' + teams.length + '.'\n  );\n}\n\nreturn [{\n  json: {\n    chat_id: String(callback.message.chat.id),\n    teams,\n    team_count: teams.length,\n    text: '🏀 NBA\\n\\nWhich team would you like to follow?'\n  }\n}];"
+      },
+      "id": "b91ed937-d97e-44ab-bf52-185aa8727158",
+      "name": "Prepare NBA teams",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        15584,
+        5024
+      ]
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $json.chat_id }}",
+        "text": "={{ $json.text }}",
+        "replyMarkup": "inlineKeyboard",
+        "inlineKeyboard": {
+          "rows": [
+            {
+              "row": {
+                "buttons": [
+                  {
+                    "text": "={{ $json.teams[0].label }}",
+                    "additionalFields": {
+                      "callback_data": "={{ 'follow:basketball:' + $json.teams[0].id }}"
+                    }
+                  },
+                  {
+                    "text": "={{ $json.teams[1].label }}",
+                    "additionalFields": {
+                      "callback_data": "={{ 'follow:basketball:' + $json.teams[1].id }}"
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "row": {
+                "buttons": [
+                  {
+                    "text": "={{ $json.teams[2].label }}",
+                    "additionalFields": {
+                      "callback_data": "={{ 'follow:basketball:' + $json.teams[2].id }}"
+                    }
+                  },
+                  {
+                    "text": "={{ $json.teams[3].label }}",
+                    "additionalFields": {
+                      "callback_data": "={{ 'follow:basketball:' + $json.teams[3].id }}"
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "row": {
+                "buttons": [
+                  {
+                    "text": "={{ $json.teams[4].label }}",
+                    "additionalFields": {
+                      "callback_data": "={{ 'follow:basketball:' + $json.teams[4].id }}"
+                    }
+                  },
+                  {
+                    "text": "={{ $json.teams[5].label }}",
+                    "additionalFields": {
+                      "callback_data": "={{ 'follow:basketball:' + $json.teams[5].id }}"
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "row": {
+                "buttons": [
+                  {
+                    "text": "={{ $json.teams[6].label }}",
+                    "additionalFields": {
+                      "callback_data": "={{ 'follow:basketball:' + $json.teams[6].id }}"
+                    }
+                  },
+                  {
+                    "text": "={{ $json.teams[7].label }}",
+                    "additionalFields": {
+                      "callback_data": "={{ 'follow:basketball:' + $json.teams[7].id }}"
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "row": {
+                "buttons": [
+                  {
+                    "text": "={{ $json.teams[8].label }}",
+                    "additionalFields": {
+                      "callback_data": "={{ 'follow:basketball:' + $json.teams[8].id }}"
+                    }
+                  },
+                  {
+                    "text": "={{ $json.teams[9].label }}",
+                    "additionalFields": {
+                      "callback_data": "={{ 'follow:basketball:' + $json.teams[9].id }}"
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "row": {
+                "buttons": [
+                  {
+                    "text": "={{ $json.teams[10].label }}",
+                    "additionalFields": {
+                      "callback_data": "={{ 'follow:basketball:' + $json.teams[10].id }}"
+                    }
+                  },
+                  {
+                    "text": "={{ $json.teams[11].label }}",
+                    "additionalFields": {
+                      "callback_data": "={{ 'follow:basketball:' + $json.teams[11].id }}"
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "row": {
+                "buttons": [
+                  {
+                    "text": "={{ $json.teams[12].label }}",
+                    "additionalFields": {
+                      "callback_data": "={{ 'follow:basketball:' + $json.teams[12].id }}"
+                    }
+                  },
+                  {
+                    "text": "={{ $json.teams[13].label }}",
+                    "additionalFields": {
+                      "callback_data": "={{ 'follow:basketball:' + $json.teams[13].id }}"
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "row": {
+                "buttons": [
+                  {
+                    "text": "={{ $json.teams[14].label }}",
+                    "additionalFields": {
+                      "callback_data": "={{ 'follow:basketball:' + $json.teams[14].id }}"
+                    }
+                  },
+                  {
+                    "text": "={{ $json.teams[15].label }}",
+                    "additionalFields": {
+                      "callback_data": "={{ 'follow:basketball:' + $json.teams[15].id }}"
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "row": {
+                "buttons": [
+                  {
+                    "text": "={{ $json.teams[16].label }}",
+                    "additionalFields": {
+                      "callback_data": "={{ 'follow:basketball:' + $json.teams[16].id }}"
+                    }
+                  },
+                  {
+                    "text": "={{ $json.teams[17].label }}",
+                    "additionalFields": {
+                      "callback_data": "={{ 'follow:basketball:' + $json.teams[17].id }}"
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "row": {
+                "buttons": [
+                  {
+                    "text": "={{ $json.teams[18].label }}",
+                    "additionalFields": {
+                      "callback_data": "={{ 'follow:basketball:' + $json.teams[18].id }}"
+                    }
+                  },
+                  {
+                    "text": "={{ $json.teams[19].label }}",
+                    "additionalFields": {
+                      "callback_data": "={{ 'follow:basketball:' + $json.teams[19].id }}"
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "row": {
+                "buttons": [
+                  {
+                    "text": "={{ $json.teams[20].label }}",
+                    "additionalFields": {
+                      "callback_data": "={{ 'follow:basketball:' + $json.teams[20].id }}"
+                    }
+                  },
+                  {
+                    "text": "={{ $json.teams[21].label }}",
+                    "additionalFields": {
+                      "callback_data": "={{ 'follow:basketball:' + $json.teams[21].id }}"
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "row": {
+                "buttons": [
+                  {
+                    "text": "={{ $json.teams[22].label }}",
+                    "additionalFields": {
+                      "callback_data": "={{ 'follow:basketball:' + $json.teams[22].id }}"
+                    }
+                  },
+                  {
+                    "text": "={{ $json.teams[23].label }}",
+                    "additionalFields": {
+                      "callback_data": "={{ 'follow:basketball:' + $json.teams[23].id }}"
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "row": {
+                "buttons": [
+                  {
+                    "text": "={{ $json.teams[24].label }}",
+                    "additionalFields": {
+                      "callback_data": "={{ 'follow:basketball:' + $json.teams[24].id }}"
+                    }
+                  },
+                  {
+                    "text": "={{ $json.teams[25].label }}",
+                    "additionalFields": {
+                      "callback_data": "={{ 'follow:basketball:' + $json.teams[25].id }}"
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "row": {
+                "buttons": [
+                  {
+                    "text": "={{ $json.teams[26].label }}",
+                    "additionalFields": {
+                      "callback_data": "={{ 'follow:basketball:' + $json.teams[26].id }}"
+                    }
+                  },
+                  {
+                    "text": "={{ $json.teams[27].label }}",
+                    "additionalFields": {
+                      "callback_data": "={{ 'follow:basketball:' + $json.teams[27].id }}"
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "row": {
+                "buttons": [
+                  {
+                    "text": "={{ $json.teams[28].label }}",
+                    "additionalFields": {
+                      "callback_data": "={{ 'follow:basketball:' + $json.teams[28].id }}"
+                    }
+                  },
+                  {
+                    "text": "={{ $json.teams[29].label }}",
+                    "additionalFields": {
+                      "callback_data": "={{ 'follow:basketball:' + $json.teams[29].id }}"
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "row": {
+                "buttons": [
+                  {
+                    "text": "🏠 Home",
+                    "additionalFields": {
+                      "callback_data": "menu:sports"
+                    }
+                  }
+                ]
+              }
+            }
+          ]
+        },
+        "additionalFields": {
+          "appendAttribution": false,
+          "parse_mode": "HTML"
+        }
+      },
+      "id": "5e660fcf-d2fb-46c6-9cfc-cde7180044e1",
+      "name": "Send NBA team menu",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        15808,
+        5024
+      ],
+      "webhookId": "d447bccc-3415-4169-9226-5ff5ea6568c9",
+      "credentials": {
+        "telegramApi": {
+          "id": "S4RpggWlw9PWBEfq",
+          "name": "Telegram account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const data = $input.first().json;\nconst callback = $('Telegram message').first().json.callback_query;\nif (!callback || callback.message?.chat?.type !== 'private') return [];\nif (callback.data !== 'sport:f1') return [];\nconst races = data.MRData?.RaceTable?.Races;\nif (!Array.isArray(races) || races.length !== 1 || !Array.isArray(races[0].Results)) {\n  throw new Error('No latest-race results returned. Check Get F1 drivers uses /current/last/results/.');\n}\nconst race = races[0];\nif (Number(data.MRData.total) !== race.Results.length) {\n  throw new Error('The API response is incomplete. Fetch all results before building the menu.');\n}\nconst seen = new Set();\nconst drivers = race.Results.map(result => {\n  const d = result.Driver;\n  if (!d || typeof d.driverId !== 'string' || !/^[a-zA-Z0-9_-]{1,48}$/.test(d.driverId) ||\n      typeof d.givenName !== 'string' || !d.givenName.trim() ||\n      typeof d.familyName !== 'string' || !d.familyName.trim() || seen.has(d.driverId)) {\n    throw new Error('The F1 API returned an invalid or duplicate driver.');\n  }\n  seen.add(d.driverId);\n  return {id:d.driverId,name:d.givenName.trim()+' '+d.familyName.trim(),\n          label:d.familyName.trim(),constructor:result.Constructor?.name || ''};\n}).sort((a,b) => a.label.localeCompare(b.label,'en'));\nconst labelCounts = new Map();\nfor (const d of drivers) labelCounts.set(d.label,(labelCounts.get(d.label)||0)+1);\nfor (const d of drivers) if (labelCounts.get(d.label)>1) d.label=d.name;\n// Current layout has 22 slots; don't silently omit drivers if the field changes.\nif (drivers.length !== 22) {\n  throw new Error('This menu expects 22 drivers; the latest race returned '+drivers.length+'. Check the results and menu layout.');\n}\nreturn [{json:{chat_id:String(callback.message.chat.id),drivers,driver_count:drivers.length,\n  season:race.season,round:race.round,race_name:race.raceName,race_date:race.date,\n  text:'🏎️ Formula 1\\n\\nWhich driver would you like to follow?\\n\\nDrivers from the latest completed race.'}}];"
+      },
+      "id": "d7147131-c285-42cd-8e76-6deb9db9f292",
+      "name": "Prepare F1 drivers",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        15584,
+        5216
+      ]
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $json.chat_id }}",
+        "text": "={{ $json.text }}",
+        "replyMarkup": "inlineKeyboard",
+        "inlineKeyboard": {
+          "rows": [
+            {
+              "row": {
+                "buttons": [
+                  {
+                    "text": "={{ $json.drivers[0].label }}",
+                    "additionalFields": {
+                      "callback_data": "={{ 'follow:f1:' + $json.drivers[0].id }}"
+                    }
+                  },
+                  {
+                    "text": "={{ $json.drivers[1].label }}",
+                    "additionalFields": {
+                      "callback_data": "={{ 'follow:f1:' + $json.drivers[1].id }}"
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "row": {
+                "buttons": [
+                  {
+                    "text": "={{ $json.drivers[2].label }}",
+                    "additionalFields": {
+                      "callback_data": "={{ 'follow:f1:' + $json.drivers[2].id }}"
+                    }
+                  },
+                  {
+                    "text": "={{ $json.drivers[3].label }}",
+                    "additionalFields": {
+                      "callback_data": "={{ 'follow:f1:' + $json.drivers[3].id }}"
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "row": {
+                "buttons": [
+                  {
+                    "text": "={{ $json.drivers[4].label }}",
+                    "additionalFields": {
+                      "callback_data": "={{ 'follow:f1:' + $json.drivers[4].id }}"
+                    }
+                  },
+                  {
+                    "text": "={{ $json.drivers[5].label }}",
+                    "additionalFields": {
+                      "callback_data": "={{ 'follow:f1:' + $json.drivers[5].id }}"
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "row": {
+                "buttons": [
+                  {
+                    "text": "={{ $json.drivers[6].label }}",
+                    "additionalFields": {
+                      "callback_data": "={{ 'follow:f1:' + $json.drivers[6].id }}"
+                    }
+                  },
+                  {
+                    "text": "={{ $json.drivers[7].label }}",
+                    "additionalFields": {
+                      "callback_data": "={{ 'follow:f1:' + $json.drivers[7].id }}"
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "row": {
+                "buttons": [
+                  {
+                    "text": "={{ $json.drivers[8].label }}",
+                    "additionalFields": {
+                      "callback_data": "={{ 'follow:f1:' + $json.drivers[8].id }}"
+                    }
+                  },
+                  {
+                    "text": "={{ $json.drivers[9].label }}",
+                    "additionalFields": {
+                      "callback_data": "={{ 'follow:f1:' + $json.drivers[9].id }}"
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "row": {
+                "buttons": [
+                  {
+                    "text": "={{ $json.drivers[10].label }}",
+                    "additionalFields": {
+                      "callback_data": "={{ 'follow:f1:' + $json.drivers[10].id }}"
+                    }
+                  },
+                  {
+                    "text": "={{ $json.drivers[11].label }}",
+                    "additionalFields": {
+                      "callback_data": "={{ 'follow:f1:' + $json.drivers[11].id }}"
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "row": {
+                "buttons": [
+                  {
+                    "text": "={{ $json.drivers[12].label }}",
+                    "additionalFields": {
+                      "callback_data": "={{ 'follow:f1:' + $json.drivers[12].id }}"
+                    }
+                  },
+                  {
+                    "text": "={{ $json.drivers[13].label }}",
+                    "additionalFields": {
+                      "callback_data": "={{ 'follow:f1:' + $json.drivers[13].id }}"
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "row": {
+                "buttons": [
+                  {
+                    "text": "={{ $json.drivers[14].label }}",
+                    "additionalFields": {
+                      "callback_data": "={{ 'follow:f1:' + $json.drivers[14].id }}"
+                    }
+                  },
+                  {
+                    "text": "={{ $json.drivers[15].label }}",
+                    "additionalFields": {
+                      "callback_data": "={{ 'follow:f1:' + $json.drivers[15].id }}"
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "row": {
+                "buttons": [
+                  {
+                    "text": "={{ $json.drivers[16].label }}",
+                    "additionalFields": {
+                      "callback_data": "={{ 'follow:f1:' + $json.drivers[16].id }}"
+                    }
+                  },
+                  {
+                    "text": "={{ $json.drivers[17].label }}",
+                    "additionalFields": {
+                      "callback_data": "={{ 'follow:f1:' + $json.drivers[17].id }}"
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "row": {
+                "buttons": [
+                  {
+                    "text": "={{ $json.drivers[18].label }}",
+                    "additionalFields": {
+                      "callback_data": "={{ 'follow:f1:' + $json.drivers[18].id }}"
+                    }
+                  },
+                  {
+                    "text": "={{ $json.drivers[19].label }}",
+                    "additionalFields": {
+                      "callback_data": "={{ 'follow:f1:' + $json.drivers[19].id }}"
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "row": {
+                "buttons": [
+                  {
+                    "text": "={{ $json.drivers[20].label }}",
+                    "additionalFields": {
+                      "callback_data": "={{ 'follow:f1:' + $json.drivers[20].id }}"
+                    }
+                  },
+                  {
+                    "text": "={{ $json.drivers[21].label }}",
+                    "additionalFields": {
+                      "callback_data": "={{ 'follow:f1:' + $json.drivers[21].id }}"
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "row": {
+                "buttons": [
+                  {
+                    "text": "🏠 Home",
+                    "additionalFields": {
+                      "callback_data": "menu:sports"
+                    }
+                  }
+                ]
+              }
+            }
+          ]
+        },
+        "additionalFields": {
+          "appendAttribution": false,
+          "parse_mode": "HTML"
+        }
+      },
+      "id": "c83f7a92-62b0-4afb-96e4-f716164b1d9b",
+      "name": "Send F1 driver menu",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        15808,
+        5216
+      ],
+      "webhookId": "74a53f4d-d52b-4967-bf34-e26759291486",
+      "credentials": {
+        "telegramApi": {
+          "id": "S4RpggWlw9PWBEfq",
+          "name": "Telegram account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const update = $('Telegram message').first().json;\nconst callback = update.callback_query;\nif (!callback || callback.message?.chat?.type !== 'private') return [];\nconst match = /^follow:football:([1-9][0-9]*)$/.exec(callback.data || '');\nif (!match) throw new Error('This is not a football team selection.');\nconst team = $input.first().json;\nconst expectedId = Number(match[1]);\nif (!Number.isSafeInteger(expectedId) || team.id !== expectedId || typeof team.name !== 'string' || !team.name.trim()) {\n  throw new Error('The API did not return the selected team. Nothing has been saved.');\n}\nconst label = typeof team.shortName === 'string' && team.shortName.trim() ? team.shortName.trim() : team.name.trim();\nconst norm = s => s.normalize('NFD').replace(/[\\u0300-\\u036f]/g,'').toLowerCase().replace(/[^a-z0-9]/g,'');\nconst aliases = [...new Set([team.name, label, team.tla].filter(s=>typeof s==='string').map(norm).filter(Boolean))];\nreturn [{json:{\n  chat_id:String(callback.message.chat.id),\n  action:'follow',\n  sport:'football',\n  team_key:String(expectedId),\n  label,\n  aliases,\n  daily:false,\n  reply:'✅ You’re now following ' + label + '.\\n\\nYour choice is saved. You can add more teams below.'\n}}];"
+      },
+      "id": "9170cfee-3350-4463-af78-94897733cfe5",
+      "name": "Prepare football follow",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        15584,
+        5408
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const callback = $('Telegram message').first().json.callback_query;\nif (!callback || callback.message?.chat?.type !== 'private') return [];\nconst match = /^follow:basketball:([1-9][0-9]*)$/.exec(callback.data || '');\nif (!match) throw new Error('This is not an NBA team selection.');\nconst data = $input.first().json;\nif (data.errors && Object.keys(data.errors).length) {\n  throw new Error('NBA API error: ' + JSON.stringify(data.errors));\n}\nconst expectedId = Number(match[1]);\nif (!Number.isSafeInteger(expectedId) || !Array.isArray(data.response) || data.response.length !== 1) {\n  throw new Error('The NBA API did not return one selected team. Nothing has been saved.');\n}\nconst team = data.response[0];\nif (team.id !== expectedId || team.nbaFranchise !== true || team.allStar === true || typeof team.name !== 'string' || !team.name.trim()) {\n  throw new Error('The NBA API did not return the selected NBA franchise. Nothing has been saved.');\n}\nconst label = team.name.trim();\nconst norm = s => s.normalize('NFD').replace(/[\\u0300-\\u036f]/g,'').toLowerCase().replace(/[^a-z0-9]/g,'');\nconst aliases = [...new Set([team.name,team.nickname,team.code].filter(s=>typeof s==='string').map(norm).filter(Boolean))];\nreturn [{json:{\n  chat_id:String(callback.message.chat.id),\n  action:'follow',sport:'basketball',team_key:String(expectedId),label,aliases,daily:false,\n  reply:'✅ You’re now following ' + label + '.\\n\\nYour choice is saved. You can add more teams below.'\n}}];"
+      },
+      "id": "68e2fb3c-6cad-4e98-ae61-318ddf73c53a",
+      "name": "Prepare NBA follow",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        15584,
+        5600
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const callback = $('Telegram message').first().json.callback_query;\nif (!callback || callback.message?.chat?.type !== 'private') return [];\nconst match = /^follow:f1:([a-zA-Z0-9_-]{1,48})$/.exec(callback.data || '');\nif (!match) throw new Error('This is not an F1 driver selection.');\nconst data = $input.first().json;\nconst drivers = data.MRData?.DriverTable?.Drivers;\nif (!Array.isArray(drivers) || drivers.length !== 1 || Number(data.MRData.total) !== 1) {\n  throw new Error('The F1 API did not return one selected driver. Nothing has been saved.');\n}\nconst driver = drivers[0];\nif (driver.driverId !== match[1] ||\n    typeof driver.givenName !== 'string' || !driver.givenName.trim() ||\n    typeof driver.familyName !== 'string' || !driver.familyName.trim()) {\n  throw new Error('The F1 API did not return the selected driver. Nothing has been saved.');\n}\nconst label = driver.givenName.trim() + ' ' + driver.familyName.trim();\nconst norm = s => s.normalize('NFD').replace(/[\\u0300-\\u036f]/g,'').toLowerCase().replace(/[^a-z0-9]/g,'');\nconst aliases = [...new Set([label,driver.familyName,driver.code].filter(s=>typeof s==='string').map(norm).filter(Boolean))];\nreturn [{json:{\n  chat_id:String(callback.message.chat.id),\n  action:'follow',sport:'f1',team_key:driver.driverId,label,aliases,daily:false,\n  reply:'✅ You’re now following ' + label + '.\\n\\nYour choice is saved. You can add more drivers below.'\n}}];"
+      },
+      "id": "4765df3b-8da2-4547-bdfe-823a4a87d9cc",
+      "name": "Prepare F1 follow",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        15584,
+        5792
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT sports_radar.command($1::jsonb) AS context;",
+        "options": {
+          "queryReplacement": "={{ [JSON.stringify($json)] }}"
+        }
+      },
+      "id": "2afd92fb-09ae-4c65-9ac8-4e5db36e29d8",
+      "name": "Save follow",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        15808,
+        5600
+      ],
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 2000,
+      "credentials": {
+        "postgres": {
+          "id": "wTZcc2j0HldDEYQK",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $json.context.chat_id }}",
+        "text": "={{ $json.context.reply.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;') }}",
+        "replyMarkup": "inlineKeyboard",
+        "inlineKeyboard": {
+          "rows": [
+            {
+              "row": {
+                "buttons": [
+                  {
+                    "text": "⚽ Football",
+                    "additionalFields": {
+                      "callback_data": "sport:football"
+                    }
+                  },
+                  {
+                    "text": "🏀 NBA",
+                    "additionalFields": {
+                      "callback_data": "sport:basketball"
+                    }
+                  },
+                  {
+                    "text": "🏎️ Formula 1",
+                    "additionalFields": {
+                      "callback_data": "sport:f1"
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "row": {
+                "buttons": [
+                  {
+                    "text": "⭐ My follows",
+                    "additionalFields": {
+                      "callback_data": "menu:follows"
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "row": {
+                "buttons": [
+                  {
+                    "text": "🏠 Home",
+                    "additionalFields": {
+                      "callback_data": "menu:sports"
+                    }
+                  }
+                ]
+              }
+            }
+          ]
+        },
+        "additionalFields": {
+          "appendAttribution": false,
+          "parse_mode": "HTML"
+        }
+      },
+      "id": "6b2f7d13-48cb-4509-8079-ba4bf8a229a8",
+      "name": "Confirm follow",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        16032,
+        5984
+      ],
+      "webhookId": "f487b9a2-721d-4258-ba42-8e1ac6f947e6",
+      "credentials": {
+        "telegramApi": {
+          "id": "S4RpggWlw9PWBEfq",
+          "name": "Telegram account"
+        }
+      },
+      "notes": "Shared confirmation after saving or removing a follow. Escapes database labels for Telegram HTML."
+    },
+    {
+      "parameters": {
+        "jsCode": "const data = $input.first().json;\nconst chat_id = String(data.chat_id || '');\nif (!/^[0-9]+$/.test(chat_id)) throw new Error('Missing private chat ID.');\nlet prefs = data.prefs;\nif (typeof prefs === 'string') prefs = JSON.parse(prefs);\nif (!Array.isArray(prefs)) throw new Error('Could not read your saved follows.');\nconst escape = s => String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');\nconst request = $('Understand command').first().json;\nconst button = (text, data) => ({text, additionalFields:{callback_data:data}});\nconst homeButtons = [\n  button('⚽ Football','sport:football'),button('🏀 NBA','sport:basketball'),\n  button('🏎️ Formula 1','sport:f1'),button('🔄 Refresh my follows','menu:follows')\n];\n\nif (request.route === 'manage_follows') {\n  const sports = {football:{code:'f',icon:'⚽'},basketball:{code:'b',icon:'🏀'},f1:{code:'r',icon:'🏎️'}};\n  const entries = prefs.map(p => {\n    const sport = sports[p.sport];\n    const key = String(p.team_key || '');\n    if (!sport || !/^[a-zA-Z0-9_-]{1,48}$/.test(key)) {\n      throw new Error('A saved follow has an unsupported identifier. No choices were removed.');\n    }\n    const label = String(p.label || key).replace(/\\s+/g,' ').trim().slice(0,150);\n    return {sport:p.sport, label, callback:'unfollow:'+sport.code+':'+key, icon:sport.icon};\n  }).sort((a,b) => a.sport.localeCompare(b.sport) || a.label.localeCompare(b.label,'en'));\n\n  if (!entries.length) {\n    return [{json:{chat_id,text:'<b>➖ Unfollow</b>\\n\\nYou’re not following anyone yet.',\n      buttons:[button('🏠 Sports','menu:sports'),...homeButtons]}}];\n  }\n  const pages = entries.length;\n  const requestedPage = Number.isSafeInteger(request.page) ? request.page : 0;\n  const page = Math.min(Math.max(0,requestedPage),pages-1);\n  const entry = entries[page];\n  const label = [...entry.label];\n  const short = label.length > 28 ? label.slice(0,27).join('')+'…' : entry.label;\n  const text = '<b>➖ Unfollow</b>\\n\\n'+entry.icon+' <b>'+escape(entry.label)+'</b>'+\n    '\\n\\n'+(pages>1?'Use Previous / Next to choose a saved team or driver.\\n':'')+\n    'Tap Unfollow below to remove this choice. You can follow it again at any time.'+\n    '\\n\\nSelection '+(page+1)+'/'+pages;\n  // All five fields exist on every item: compatible with the native Telegram editor.\n  // Navigation wraps at either end, while callbacks always remove a stable key.\n  const buttons = [\n    button('➖ Unfollow '+short,entry.callback),\n    pages>1 ? button('⬅️ Previous','manage:follows:'+((page+pages-1)%pages)) : button('🔄 Refresh','manage:follows:0'),\n    pages>1 ? button('Next ➡️','manage:follows:'+((page+1)%pages)) : button('➕ Follow more','menu:sports'),\n    button('⭐ My follows','menu:follows'),button('🏠 Sports','menu:sports')\n  ];\n  return [{json:{chat_id,text,buttons}}];\n}\n\nconst groups = [\n  ['football','⚽ Football'],\n  ['basketball','🏀 NBA'],\n  ['f1','🏎️ Formula 1']\n];\nconst heading = '<b>⭐ My follows</b>';\nconst pages = [];\nlet body = heading;\nlet count = 0;\nfor (const [sport,title] of groups) {\n  const entries = prefs.filter(p => p.sport === sport).map(p => ({\n    ...p,label:String(p.label || p.team_key || 'Unnamed selection').replace(/\\s+/g,' ').trim().slice(0,150)\n  })).sort((a,b) => a.label.localeCompare(b.label,'en'));\n  if (!entries.length) continue;\n  const section = '\\n\\n<b>' + title + '</b>';\n  if ((body+section).length > 3400) { pages.push(body); body=heading; }\n  body += section;\n  for (const entry of entries) {\n    const line = '\\n• ' + escape(entry.label);\n    if ((body+line).length > 3400) { pages.push(body); body=heading+section; }\n    body += line;\n    count++;\n  }\n}\nif (!count) body += '\\n\\nYou’re not following anyone yet. Choose a sport below to get started.';\npages.push(body);\nconst buttons = [count\n  ? button('➖ Unfollow','manage:follows:0')\n  : button('🏠 Sports','menu:sports'), ...homeButtons];\nreturn pages.map((text,i) => ({json:{chat_id,\n  text:pages.length>1 ? text+'\\n\\nPage '+(i+1)+'/'+pages.length : text,\n  buttons\n}}));"
+      },
+      "id": "70386653-7c8a-44a1-9051-2ea56ee16841",
+      "name": "Format my follows",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        15584,
+        5984
+      ]
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $json.chat_id }}",
+        "text": "={{ $json.text }}",
+        "replyMarkup": "inlineKeyboard",
+        "inlineKeyboard": {
+          "rows": [
+            {
+              "row": {
+                "buttons": [
+                  {
+                    "text": "={{ $json.buttons[0].text }}",
+                    "additionalFields": {
+                      "callback_data": "={{ $json.buttons[0].additionalFields.callback_data }}"
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "row": {
+                "buttons": [
+                  {
+                    "text": "={{ $json.buttons[1].text }}",
+                    "additionalFields": {
+                      "callback_data": "={{ $json.buttons[1].additionalFields.callback_data }}"
+                    }
+                  },
+                  {
+                    "text": "={{ $json.buttons[2].text }}",
+                    "additionalFields": {
+                      "callback_data": "={{ $json.buttons[2].additionalFields.callback_data }}"
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "row": {
+                "buttons": [
+                  {
+                    "text": "={{ $json.buttons[3].text }}",
+                    "additionalFields": {
+                      "callback_data": "={{ $json.buttons[3].additionalFields.callback_data }}"
+                    }
+                  },
+                  {
+                    "text": "={{ $json.buttons[4].text }}",
+                    "additionalFields": {
+                      "callback_data": "={{ $json.buttons[4].additionalFields.callback_data }}"
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "row": {
+                "buttons": [
+                  {
+                    "text": "🏠 Home",
+                    "additionalFields": {
+                      "callback_data": "menu:sports"
+                    }
+                  }
+                ]
+              }
+            }
+          ]
+        },
+        "additionalFields": {
+          "appendAttribution": false,
+          "parse_mode": "HTML"
+        }
+      },
+      "id": "7ae54afc-1459-46fc-ab15-3687e02b30ff",
+      "name": "Send my follows",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        15808,
+        5984
+      ],
+      "webhookId": "7b76b595-00bd-4e9c-8abc-52c540e53663",
+      "credentials": {
+        "telegramApi": {
+          "id": "S4RpggWlw9PWBEfq",
+          "name": "Telegram account"
+        }
+      },
+      "notes": "Five native button fields shared by My follows and the Unfollow selector. The formatter supplies labels and callbacks."
+    },
+    {
+      "parameters": {
+        "jsCode": "return [{json:$input.first().json.context}];"
+      },
+      "id": "2483aace-7a3e-4ddc-8103-b8c658762b35",
+      "name": "Read saved context",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        15584,
+        6176
+      ]
+    },
+    {
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "value": "zeG9avr12G94Pjrb",
+          "mode": "list",
+          "cachedResultUrl": "/workflow/zeG9avr12G94Pjrb",
+          "cachedResultName": "02 Sports Radar - Build and send briefing"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "context": "={{ $json }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "context",
+              "displayName": "context",
+              "required": true,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "object"
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "mode": "each",
+        "options": {
+          "waitForSubWorkflow": true
+        }
+      },
+      "id": "56b405d2-6efc-43f1-a2f8-df4169fb3711",
+      "name": "Build and send briefing",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.3,
+      "position": [
+        15808,
+        6176
+      ]
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $('Understand command').first().json.chat_id }}",
+        "text": "={{ $('Understand command').first().json.reply.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;') }}",
+        "replyMarkup": "inlineKeyboard",
+        "inlineKeyboard": {
+          "rows": [
+            {
+              "row": {
+                "buttons": [
+                  {
+                    "text": "⚽ Football",
+                    "additionalFields": {
+                      "callback_data": "sport:football"
+                    }
+                  },
+                  {
+                    "text": "🏀 NBA",
+                    "additionalFields": {
+                      "callback_data": "sport:basketball"
+                    }
+                  },
+                  {
+                    "text": "🏎️ Formula 1",
+                    "additionalFields": {
+                      "callback_data": "sport:f1"
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "row": {
+                "buttons": [
+                  {
+                    "text": "⭐ My follows",
+                    "additionalFields": {
+                      "callback_data": "menu:follows"
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "row": {
+                "buttons": [
+                  {
+                    "text": "={{ $('Understand command').first().json.reply.startsWith('Welcome to Sports Radar') ? '📅 Upcoming events' : '🏠 Home' }}",
+                    "additionalFields": {
+                      "callback_data": "={{ $('Understand command').first().json.reply.startsWith('Welcome to Sports Radar') ? 'menu:events' : 'menu:sports' }}"
+                    }
+                  }
+                ]
+              }
+            }
+          ]
+        },
+        "additionalFields": {
+          "appendAttribution": false,
+          "parse_mode": "HTML"
+        }
+      },
+      "id": "8a3f230b-4b18-4ee8-b556-c87f0228b4e3",
+      "name": "Reply to command",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        15584,
+        6560
+      ],
+      "webhookId": "d7ffcffd-274a-468d-9564-ca27bc423384",
+      "credentials": {
+        "telegramApi": {
+          "id": "S4RpggWlw9PWBEfq",
+          "name": "Telegram account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH removed AS (\n  DELETE FROM sports_radar.follows\n  WHERE chat_id = $1::text AND sport = $2::text AND team_key = $3::text\n  RETURNING label\n)\nSELECT jsonb_build_object(\n  'chat_id', $1::text,\n  'reply', CASE WHEN EXISTS (SELECT 1 FROM removed)\n    THEN '✅ You’ve stopped following ' || (SELECT label FROM removed) || '.'\n    ELSE 'You’re no longer following that selection.'\n  END || E'\\n\\nTap My follows to see your updated list.'\n) AS context;",
+        "options": {
+          "queryReplacement": "={{ [$('Understand command').first().json.chat_id, $('Understand command').first().json.sport, $('Understand command').first().json.team_key] }}"
+        }
+      },
+      "id": "2b16853b-4790-4775-8016-13c86a803438",
+      "name": "Remove follow",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        15808,
+        6368
+      ],
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 2000,
+      "credentials": {
+        "postgres": {
+          "id": "wTZcc2j0HldDEYQK",
+          "name": "Postgres account"
+        }
+      },
+      "notes": "Deletes only the selected follow belonging to this private chat. Returns a confirmation even for an old/already removed button."
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT sports_radar.command($1::jsonb) AS context;",
+        "options": {
+          "queryReplacement": "={{ [JSON.stringify($('Understand command').first().json)] }}"
+        }
+      },
+      "id": "492b1ad3-f091-49a7-8eca-efee76e7f46f",
+      "name": "Save daily settings",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        15360,
+        6640
+      ],
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 2000,
+      "credentials": {
+        "postgres": {
+          "id": "wTZcc2j0HldDEYQK",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "d6a3562c-7ef8-3e6a-3831-7d7df910ce5f",
+              "leftValue": "={{ $('Understand command').first().json.route === 'alert_settings' }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "3d003afb-674f-4d26-a587-426dc8d378ad",
+      "name": "Alert settings?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        14240,
+        5696
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT sports_radar.set_alert_preferences($1::jsonb) AS request;",
+        "options": {
+          "queryReplacement": "={{ [JSON.stringify($('Understand command').first().json)] }}"
+        }
+      },
+      "id": "29c8d893-44d6-4d2f-ad0c-0afd4728de36",
+      "name": "Save alert settings",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        14464,
+        5936
+      ],
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 2000,
+      "credentials": {
+        "postgres": {
+          "id": "wTZcc2j0HldDEYQK",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const r=$input.first().json.request;const c=typeof r==='string'?JSON.parse(r):r;return [{json:{chat_id:c.chat_id,text:c.reply}}];"
+      },
+      "id": "fe09a304-5287-41bd-ad4a-d58df9f4a710",
+      "name": "Read alert settings",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        14688,
+        5936
+      ]
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $json.chat_id }}",
+        "text": "={{ $json.text }}",
+        "replyMarkup": "inlineKeyboard",
+        "inlineKeyboard": {
+          "rows": [
+            {
+              "row": {
+                "buttons": [
+                  {
+                    "text": "🏠 Home",
+                    "additionalFields": {
+                      "callback_data": "menu:sports"
+                    }
+                  }
+                ]
+              }
+            }
+          ]
+        },
+        "additionalFields": {
+          "appendAttribution": false,
+          "parse_mode": "HTML"
+        }
+      },
+      "id": "9f5cfc07-ebf7-484b-a261-d27f67d9e8a7",
+      "name": "Confirm alert settings",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        14912,
+        5936
+      ],
+      "webhookId": "24078281-1f83-4078-a162-7f5ea649821c",
+      "credentials": {
+        "telegramApi": {
+          "id": "S4RpggWlw9PWBEfq",
+          "name": "Telegram account"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH claimed AS (\n INSERT INTO sports_radar.processed_updates(update_id,chat_id)\n SELECT $1::bigint,$2::text WHERE $4::boolean\n ON CONFLICT(update_id) DO NOTHING RETURNING update_id\n)\nSELECT $3::jsonb AS update WHERE EXISTS (SELECT 1 FROM claimed);",
+        "options": {
+          "queryReplacement": "={{ [$json.update_id, String(($json.callback_query?.message || $json.message)?.chat?.id || ''), JSON.stringify($json), ($json.callback_query?.message || $json.message)?.chat?.type === 'private'] }}"
+        }
+      },
+      "id": "670cec61-4f9f-49a8-8c6f-12e80c5b23bb",
+      "name": "Claim Telegram update",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        13792,
+        5696
+      ],
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 2000,
+      "credentials": {
+        "postgres": {
+          "id": "wTZcc2j0HldDEYQK",
+          "name": "Postgres account"
+        }
+      },
+      "notes": "An update ID is claimed once before any side effects. A fresh user command has a new ID and is processed normally. Failed commands can be sent again as a fresh message."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "e2ed5a71-7d02-4d88-8785-27f888d435d4",
+              "leftValue": "={{ $('Understand command').first().json.route === 'demo_failure' }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "243d7350-34b6-4c64-be97-5f806863f9e8",
+      "name": "Demo failure?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        14464,
+        5600
+      ]
+    },
+    {
+      "parameters": {
+        "url": "https://example.com/sports-radar-deliberate-404",
+        "options": {
+          "timeout": 10000
+        }
+      },
+      "id": "92825338-71d4-481b-8116-b87ebb15b28c",
+      "name": "Demonstrate controlled API failure",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        14688,
+        5504
+      ],
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 2000,
+      "notes": "Deliberate demonstration only: /demoerror routes here. Normal sports requests are unaffected. The HTTP 404 must trigger workflow 04."
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Telegram message": {
+      "main": [
+        [
+          {
+            "node": "Claim Telegram update",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Understand command": {
+      "main": [
+        [
+          {
+            "node": "Alert settings?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Button click?": {
+      "main": [
+        [
+          {
+            "node": "Acknowledge button",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Route request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Acknowledge button": {
+      "main": [
+        [
+          {
+            "node": "Route request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route request": {
+      "main": [
+        [
+          {
+            "node": "Choose football league",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Get league teams",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Get NBA teams",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Get F1 Drivers",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Get selected football team",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Get selected NBA team",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Get selected F1 driver",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Load my follows",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Save command and load preferences",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Load my follows",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Remove follow",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Save daily settings",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Reply to command",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get league teams": {
+      "main": [
+        [
+          {
+            "node": "Prepare football teams",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare football teams": {
+      "main": [
+        [
+          {
+            "node": "20 teams?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get NBA teams": {
+      "main": [
+        [
+          {
+            "node": "Prepare NBA teams",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare NBA teams": {
+      "main": [
+        [
+          {
+            "node": "Send NBA team menu",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get F1 Drivers": {
+      "main": [
+        [
+          {
+            "node": "Prepare F1 drivers",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare F1 drivers": {
+      "main": [
+        [
+          {
+            "node": "Send F1 driver menu",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get selected football team": {
+      "main": [
+        [
+          {
+            "node": "Prepare football follow",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare football follow": {
+      "main": [
+        [
+          {
+            "node": "Save follow",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Save follow": {
+      "main": [
+        [
+          {
+            "node": "Confirm follow",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get selected NBA team": {
+      "main": [
+        [
+          {
+            "node": "Prepare NBA follow",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare NBA follow": {
+      "main": [
+        [
+          {
+            "node": "Save follow",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get selected F1 driver": {
+      "main": [
+        [
+          {
+            "node": "Prepare F1 follow",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare F1 follow": {
+      "main": [
+        [
+          {
+            "node": "Save follow",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Load my follows": {
+      "main": [
+        [
+          {
+            "node": "Format my follows",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format my follows": {
+      "main": [
+        [
+          {
+            "node": "Send my follows",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Save command and load preferences": {
+      "main": [
+        [
+          {
+            "node": "Read saved context",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read saved context": {
+      "main": [
+        [
+          {
+            "node": "Build and send briefing",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "20 teams?": {
+      "main": [
+        [
+          {
+            "node": "Send 20-team menu",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Send 18-team menu",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Remove follow": {
+      "main": [
+        [
+          {
+            "node": "Confirm follow",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Save daily settings": {
+      "main": [
+        [
+          {
+            "node": "Reply to command",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Alert settings?": {
+      "main": [
+        [
+          {
+            "node": "Save alert settings",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Demo failure?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Save alert settings": {
+      "main": [
+        [
+          {
+            "node": "Read alert settings",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read alert settings": {
+      "main": [
+        [
+          {
+            "node": "Confirm alert settings",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Claim Telegram update": {
+      "main": [
+        [
+          {
+            "node": "Understand command",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Demo failure?": {
+      "main": [
+        [
+          {
+            "node": "Demonstrate controlled API failure",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Button click?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "timeSavedMode": "fixed",
+    "errorWorkflow": "fAG5yPnBOyIugGks",
+    "callerPolicy": "workflowsFromSameOwner",
+    "availableInMCP": false
+  },
+  "versionId": "ca6452fb-8ff1-40ab-a44f-cc3e4a8414c8",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "7f5b4816cf946ff530226ad8173417053f6c6a61e7a2cb6ce6af47a8f65f31ed"
+  },
+  "nodeGroups": [],
+  "id": "0v9VU0Sv0xmCsJxf",
+  "tags": []
+}

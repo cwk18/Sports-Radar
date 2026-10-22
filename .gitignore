@@ -1,0 +1,13 @@
+# Secrets and private working files
+.env
+.env.*
+private/
+backups/
+*.log
+.DS_Store
+node_modules/
+__pycache__/
+# Personal study materials
+*REVISION_GUIDE*
+*revision_guide*
+*Personal_Study_Guide*
